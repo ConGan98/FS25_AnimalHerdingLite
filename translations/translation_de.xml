@@ -1,0 +1,16 @@
+<l10n>
+	<texts>
+		<text name="ahl_startHerding" text="Beginnen Sie mit dem Hüten"/>
+		<text name="ahl_stopHerding" text="Hören Sie auf zu hüten"/>
+		<text name="ahl_herdedAnimal" text="Herdentier"/>
+		<text name="ahl_pickupAnimal" text="Tier abholen"/>
+		<text name="ahl_carriedAnimal" text="Getragenes Tier"/>
+		<text name="ahl_feedBucket" text="Futterbehälter"/>
+		<text name="ahl_function_bucket" text="Mit einem Futterschaufel können Sie Tiere zu sich herantreiben."/>
+		<text name="ahl_notInHusbandry" text="Sie müssen sich in einem Stall befinden, um das Hüten zu starten."/>
+		<text name="ahl_unloadTrailer" text="Anhänger entladen"/>
+		<text name="ahl_trailerTypeMismatch" text="Tiere im Anhänger passen nicht zu diesem Stall"/>
+		<text name="input_HerdingLite" text=""/>
+		<text name="input_HerdingLiteUnload" text="Anhänger in Stall entladen"/>
+	</texts>
+</l10n>
