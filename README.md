@@ -1,11 +1,15 @@
 # FS25 Animal Herding - Lite
 
+> **WARNING: This mod is currently in active development. There are known issues and bugs. Only install this mod if you are comfortable with it potentially causing issues in your game. Use at your own risk -- back up your save files before use.**
+
 A Farming Simulator 25 mod that enables players to physically herd animals outside their pens. Walk animals across the map on foot or in vehicles, attract them with a feed bucket, or pick up and carry young/light animals by hand.
 
 > **Original mod by [Arrow-kb](https://github.com/Arrow-kb)**
 > Original repository: [FS25_AnimalHerdingLite](https://github.com/Arrow-kb/FS25_AnimalHerdingLite)
 >
 > This fork is maintained by **ConGan98** and extends the original with additional features and mod compatibility improvements.
+
+**Please read this entire page before downloading and installing the mod.**
 
 ---
 
@@ -37,15 +41,13 @@ This mod **requires** [RealisticLivestock (RLRM)](https://github.com/rittermod/F
 ### Multiplayer
 - Multiplayer support is currently **unknown** and needs testing
 
-### Media
+---
 
-**Video:**
+## Development Progress
 
-[![Herding Mod Lite](https://i.imgur.com/uyh39fJ.png)](https://imgur.com/a/fs25-herdingmod-lite-uyh39fJ)
+Follow the development progress and known issues on the Trello board:
 
-**Screenshots:**
-
-![Screenshots](https://i.imgur.com/BC2obun.png)
+[FS25 Herding Mod -- Trello Board](https://trello.com/b/YFcBxOac/fs25herding-mod)
 
 ---
 
