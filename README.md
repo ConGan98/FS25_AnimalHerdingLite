@@ -37,6 +37,16 @@ This mod **requires** [RealisticLivestock (RLRM)](https://github.com/rittermod/F
 ### Multiplayer
 - Multiplayer support is currently **unknown** and needs testing
 
+### Media
+
+**Video:**
+
+[![Herding Mod Lite](https://i.imgur.com/uyh39fJ.png)](https://imgur.com/a/fs25-herdingmod-lite-uyh39fJ)
+
+**Screenshots:**
+
+![Screenshots](https://i.imgur.com/BC2obun.png)
+
 ---
 
 ## Controls
