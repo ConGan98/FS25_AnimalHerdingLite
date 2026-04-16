@@ -7,10 +7,23 @@ local keyName = "FS25_AnimalHerdingLite.animal"
 -- Freezes the carried animal at the "sleep" pose.
 -- Uses getAnimClipIndex + assignAnimTrackClip (confirmed FS25 GEX API from AnimalSystem.lua).
 -- Skeleton is at child[0] after createHerdableAnimalFromData normalization.
-local function applySleepPose(node, cache)
+-- Chickens have a different node structure and no sleep clip — skip them entirely.
+local function applySleepPose(node, cache, animalTypeIndex)
+
+    if animalTypeIndex == AnimalType.CHICKEN then return end
+
+    local numChildren = getNumOfChildren(node)
+    if numChildren == 0 then return end
 
     local skeletonNode = getChildAt(node, 0)
+    if skeletonNode == nil or skeletonNode == 0 then return end
+
+    local numSkeletonChildren = getNumOfChildren(skeletonNode)
+    if numSkeletonChildren == 0 then return end
+
     local skinNode     = getChildAt(skeletonNode, 0)
+    if skinNode == nil or skinNode == 0 then return end
+
     local animSet      = getAnimCharacterSet(cache.animationUsesSkeleton and skeletonNode or skinNode)
 
     if animSet == nil or animSet == 0 then return end
@@ -54,7 +67,7 @@ end
 -- than cloning it.  The node already has breed-correct textures from when it was herded
 -- (applyRLVisuals ran successfully at that point).  We nil out animal.nodes.root so
 -- HerdableAnimal:delete() won't call delete() on a node we now own.
-local function stealHerdedRLVisualNode(graphicalNode, cache, animal)
+local function stealHerdedRLVisualNode(graphicalNode, cache, animal, animalTypeIndex)
 
     if animal.nodes == nil or animal.nodes.root == nil or animal.nodes.root == 0 then return nil end
 
@@ -65,10 +78,10 @@ local function stealHerdedRLVisualNode(graphicalNode, cache, animal)
     setVisibility(node, true)
 
     -- Clear dirt accumulated while the animal was walking in the field.
-	
+
     I3DUtil.setShaderParameterRec(node, "dirt", 0, nil, nil, nil)
 
-    applySleepPose(node, cache)
+    applySleepPose(node, cache, animalTypeIndex)
 
     return node
 
@@ -162,7 +175,7 @@ function HandToolAnimal:onPostLoad(savegame)
 		I3DUtil.setShaderParameterRec(node, "dirt", 0, nil, nil, nil)
 		local pseudoAnimal = { cluster = spec.animal, nodes = { root = node, mesh = meshNode }, visualAnimalIndex = spec.visualAnimalIndex }
 		local ok = pcall(g_animalManager.applyRLVisuals, g_animalManager, pseudoAnimal)
-		if ok then applySleepPose(node, cache) end
+		if ok then applySleepPose(node, cache, spec.animalTypeIndex) end
 	else
 		local x, y, z, w = unpack(spec.tiles)
 		node = buildVisualNode(self.graphicalNode, cache, x, y, z, w)
@@ -295,7 +308,7 @@ function HandToolAnimal:setEngineAnimal(husbandryId, animalId)
 			local pseudoAnimal = { cluster = clonedAnimal, nodes = { root = cloneNode, mesh = meshNode }, visualAnimalIndex = visualAnimalIndex }
 			local ok = pcall(g_animalManager.applyRLVisuals, g_animalManager, pseudoAnimal)
 			if ok then
-				applySleepPose(cloneNode, cache)
+				applySleepPose(cloneNode, cache, animalTypeIndex)
 			end
 			node = cloneNode
 		else
@@ -353,7 +366,7 @@ function HandToolAnimal:setHerdingAnimal(animalNode, farmId)
 
 	local node
 	if AnimalManager.CONFLICTS.REALISTIC_LIVESTOCK then
-		node = stealHerdedRLVisualNode(self.graphicalNode, cache, animal)
+		node = stealHerdedRLVisualNode(self.graphicalNode, cache, animal, animalTypeIndex)
 	else
 		local x, y, z, w = unpack(animal.tiles)
 		node = buildVisualNode(self.graphicalNode, cache, x, y, z, w)

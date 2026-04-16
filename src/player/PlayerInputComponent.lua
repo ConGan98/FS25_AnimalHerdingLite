@@ -1,5 +1,28 @@
 local modName = g_currentModName
 
+local MAX_PICKUP_AGE = 3
+
+
+-- Returns a rejection reason key if the animal cannot be picked up, or nil if it can.
+local function getPickupRejectionReason(cluster)
+    if cluster == nil then return nil end
+    if cluster.getCanBePickedUp ~= nil and cluster:getCanBePickedUp() then return nil end
+
+    local animalTypeIndex
+    if cluster.getAnimalTypeIndex ~= nil then
+        animalTypeIndex = cluster:getAnimalTypeIndex()
+    elseif cluster.subTypeIndex ~= nil then
+        animalTypeIndex = g_currentMission.animalSystem:getTypeIndexBySubTypeIndex(cluster.subTypeIndex)
+    end
+
+    if animalTypeIndex == AnimalType.HORSE then return nil end
+
+    if cluster.weight ~= nil and cluster.weight > 100 then return "ahl_tooHeavyToPickup" end
+    if cluster.age ~= nil and cluster.age >= MAX_PICKUP_AGE then return "ahl_tooOldToPickup" end
+
+    return nil
+end
+
 
 PlayerInputComponent.registerGlobalPlayerActionEvents = Utils.appendedFunction(PlayerInputComponent.registerGlobalPlayerActionEvents, function(self)
 
@@ -27,20 +50,29 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
 
     self.animalPickup = nil
 
-    -- Only process on the owning player, in normal on-foot mode, not already carrying, server-only (SP or MP host without active clients)
+    -- Only process on the owning player, in normal on-foot mode, server-only (SP or MP host without active clients)
     if not self.player.isOwner
         or g_inputBinding:getContextName() ~= PlayerInputComponent.INPUT_CONTEXT_NAME
-        or self.player:getIsCarryingAnimal()
         or not g_currentMission:getIsServer()
         or g_server.netIsRunning
     then return end
+
+    -- When carrying an animal, show the return prompt instead of pickup detection
+    if self.player:getIsCarryingAnimal() then
+        self.animalPickup = { ["return"] = true }
+        g_inputBinding:setActionEventText(self.enterActionId, g_i18n:getText("ahl_returnAnimal"))
+        g_inputBinding:setActionEventActive(self.enterActionId, true)
+        return
+    end
+
+    -- Don't allow pickup while herding is active
+    local farmId = self.player.farmId
+    if g_animalManager.farms[farmId] ~= nil then return end
 
     -- Don't intercept interact when an accessible vehicle is in range
     local vehicleInRange = g_currentMission.interactiveVehicleInRange
     local accessHandler = g_currentMission.accessHandler
     if vehicleInRange ~= nil and accessHandler:canPlayerAccess(vehicleInRange, self.player) then return end
-
-    local farmId = self.player.farmId
     local px, _, pz = getWorldTranslation(self.player.rootNode)
 
     -- ── Herded animals: proximity walk (custom proxy nodes are not auto-registered with the GIANTS targeter) ──
@@ -49,18 +81,25 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
 
         local PICKUP_RANGE = 3.5
         local bestAnimal, bestDist = nil, PICKUP_RANGE
+        local closestRejected, closestRejectedDist, rejectionReason = nil, PICKUP_RANGE, nil
 
         for _, animal in ipairs(farm.animals) do
-
-            if animal.cluster.getCanBePickedUp == nil or not animal.cluster:getCanBePickedUp() then continue end
 
             local dx = animal.position.x - px
             local dz = animal.position.z - pz
             local dist = math.sqrt(dx * dx + dz * dz)
 
-            if dist < bestDist then
-                bestAnimal = animal
-                bestDist = dist
+            if dist < PICKUP_RANGE then
+                if animal.cluster.getCanBePickedUp ~= nil and animal.cluster:getCanBePickedUp() then
+                    if dist < bestDist then
+                        bestAnimal = animal
+                        bestDist = dist
+                    end
+                elseif dist < closestRejectedDist then
+                    closestRejected = animal
+                    closestRejectedDist = dist
+                    rejectionReason = getPickupRejectionReason(animal.cluster)
+                end
             end
 
         end
@@ -76,39 +115,129 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
             g_inputBinding:setActionEventActive(self.enterActionId, true)
             return
 
+        elseif closestRejected ~= nil and rejectionReason ~= nil then
+            local now = g_time or 0
+            if self.pickupRejectionWarningTime == nil or now - self.pickupRejectionWarningTime > 5000 then
+                self.pickupRejectionWarningTime = now
+                g_currentMission:showBlinkingWarning(g_i18n:getText(rejectionReason, modName), 3000)
+            end
+            return
         end
 
     end
 
     -- ── Engine / husbandry animals: GIANTS auto-registers their collision nodes so the targeter works ──
-    if self.player.targeter == nil then return end
+    local foundEngineAnimal = false
 
-    local closestNode = self.player.targeter:getClosestTargetedNodeFromType(PlayerInputComponent)
-    self.player.hudUpdater:setCurrentRaycastTarget(closestNode)
+    if self.player.targeter ~= nil then
 
-    if closestNode == nil then return end
+        local closestNode = self.player.targeter:getClosestTargetedNodeFromType(PlayerInputComponent)
+        self.player.hudUpdater:setCurrentRaycastTarget(closestNode)
 
-    local husbandryId, animalId = getAnimalFromCollisionNode(closestNode)
+        if closestNode ~= nil then
 
-    if husbandryId == nil or husbandryId == 0 then return end
+            local husbandryId, animalId = getAnimalFromCollisionNode(closestNode)
 
-    local clusterHusbandry = g_currentMission.husbandrySystem:getClusterHusbandryById(husbandryId)
+            if husbandryId ~= nil and husbandryId ~= 0 then
 
-    if clusterHusbandry == nil then return end
+                local clusterHusbandry = g_currentMission.husbandrySystem:getClusterHusbandryById(husbandryId)
 
-    local placeable = clusterHusbandry:getPlaceable()
-    local animal = clusterHusbandry:getClusterByAnimalId(animalId, husbandryId)
+                if clusterHusbandry ~= nil then
 
-    if animal ~= nil and accessHandler:canFarmAccess(self.player.farmId, placeable) and animal.getCanBePickedUp ~= nil and animal:getCanBePickedUp() then
+                    local placeable = clusterHusbandry:getPlaceable()
+                    local animal = clusterHusbandry:getClusterByAnimalId(animalId, husbandryId)
 
-        self.animalPickup = {
-            ["herding"] = false,
-            ["husbandryId"] = husbandryId,
-            ["animalId"] = animalId
-        }
+                    if animal ~= nil and accessHandler:canFarmAccess(self.player.farmId, placeable) then
 
-        g_inputBinding:setActionEventText(self.enterActionId, g_i18n:getText("ahl_pickupAnimal"))
-        g_inputBinding:setActionEventActive(self.enterActionId, true)
+                        foundEngineAnimal = true
+
+                        if animal.getCanBePickedUp ~= nil and animal:getCanBePickedUp() then
+
+                            self.animalPickup = {
+                                ["herding"] = false,
+                                ["husbandryId"] = husbandryId,
+                                ["animalId"] = animalId
+                            }
+
+                            g_inputBinding:setActionEventText(self.enterActionId, g_i18n:getText("ahl_pickupAnimal"))
+                            g_inputBinding:setActionEventActive(self.enterActionId, true)
+                            return
+
+                        else
+                            local reason = getPickupRejectionReason(animal)
+                            if reason ~= nil then
+                                local now = g_time or 0
+                                if self.pickupRejectionWarningTime == nil or now - self.pickupRejectionWarningTime > 5000 then
+                                    self.pickupRejectionWarningTime = now
+                                    g_currentMission:showBlinkingWarning(g_i18n:getText(reason, modName), 3000)
+                                end
+                            end
+                        end
+
+                    end
+
+                end
+
+            end
+
+        end
+
+    end
+
+    -- ── Pen chickens: no collision proxy so the targeter can't find them — use position proximity instead ──
+    if not foundEngineAnimal then
+
+        local CHICKEN_PICKUP_RANGE = 3.0
+        local bestHusbandryId, bestAnimalId, bestDist = nil, nil, CHICKEN_PICKUP_RANGE
+
+        for _, husbandry in pairs(g_currentMission.husbandrySystem.placeables) do
+            if husbandry:getOwnerFarmId() ~= farmId then continue end
+            if husbandry:getAnimalTypeIndex() ~= AnimalType.CHICKEN then continue end
+
+            local clusterHusbandry = husbandry.spec_husbandryAnimals ~= nil and husbandry.spec_husbandryAnimals.clusterHusbandry or nil
+            if clusterHusbandry == nil then continue end
+
+            if g_animalManager:getHasHusbandryConflict() then
+                -- RL: animalIdToCluster is [index] → { [animalId] → cluster }
+                for i, animalIds in pairs(clusterHusbandry.animalIdToCluster) do
+                    local hId = clusterHusbandry.husbandryIds[i]
+                    if hId == nil then continue end
+                    for animalId, cluster in pairs(animalIds) do
+                        local ax, _, az = getAnimalPosition(hId, animalId)
+                        local dist = MathUtil.vector2Length(px - ax, pz - az)
+                        if dist < bestDist and cluster.getCanBePickedUp ~= nil and cluster:getCanBePickedUp() then
+                            bestHusbandryId = hId
+                            bestAnimalId = animalId
+                            bestDist = dist
+                        end
+                    end
+                end
+            else
+                -- Vanilla: animalIdToCluster is [animalId] → cluster
+                local hId = clusterHusbandry.husbandryId
+                if hId ~= nil then
+                    for animalId, cluster in pairs(clusterHusbandry.animalIdToCluster) do
+                        local ax, _, az = getAnimalPosition(hId, animalId)
+                        local dist = MathUtil.vector2Length(px - ax, pz - az)
+                        if dist < bestDist and cluster.getCanBePickedUp ~= nil and cluster:getCanBePickedUp() then
+                            bestHusbandryId = hId
+                            bestAnimalId = animalId
+                            bestDist = dist
+                        end
+                    end
+                end
+            end
+        end
+
+        if bestHusbandryId ~= nil then
+            self.animalPickup = {
+                ["herding"] = false,
+                ["husbandryId"] = bestHusbandryId,
+                ["animalId"] = bestAnimalId
+            }
+            g_inputBinding:setActionEventText(self.enterActionId, g_i18n:getText("ahl_pickupAnimal"))
+            g_inputBinding:setActionEventActive(self.enterActionId, true)
+        end
 
     end
 
@@ -209,6 +338,15 @@ end)
 PlayerInputComponent.onInputEnter = Utils.appendedFunction(PlayerInputComponent.onInputEnter, function(self)
 
     if g_time <= g_currentMission.lastInteractionTime + 200 or g_currentMission.interactiveVehicleInRange ~= nil or self.rideablePlaceable ~= nil or self.animalPickup == nil then return end
+
+    -- Return carried animal to its original husbandry
+    if self.animalPickup["return"] then
+        local currentHandTool = self.player:getHeldHandTool()
+        if currentHandTool ~= nil then
+            g_animalManager:returnCarriedAnimalToHusbandry(currentHandTool)
+        end
+        return
+    end
 
     local handToolType = g_handToolTypeManager:getTypeByName(modName .. ".animal")
     local handTool = _G[handToolType.className].new(g_currentMission:getIsServer(), g_currentMission:getIsClient())

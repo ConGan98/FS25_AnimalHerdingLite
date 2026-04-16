@@ -1,5 +1,5 @@
 <handTool xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" type="animal">
-	<base mass="10" canBeDropped="false">
+	<base mass="10" canBeDropped="false" canBeSaved="false">
 		<filename>handTools/animal/animal.i3d</filename>
 		<typeDesc>Animal</typeDesc>
 		<graphics node="graphics" lockFirstPerson="true"/>

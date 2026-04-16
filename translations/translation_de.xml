@@ -4,6 +4,12 @@
 		<text name="ahl_stopHerding" text="Hören Sie auf zu hüten"/>
 		<text name="ahl_herdedAnimal" text="Herdentier"/>
 		<text name="ahl_pickupAnimal" text="Tier abholen"/>
+		<text name="ahl_returnAnimal" text="Tier zurückbringen"/>
+		<text name="ahl_wrongHusbandryType" text="Dieser Stall akzeptiert diesen Tiertyp nicht"/>
+		<text name="ahl_tooOldToPickup" text="Dieses Tier ist zu alt zum Aufheben"/>
+		<text name="ahl_tooHeavyToPickup" text="Dieses Tier ist zu schwer zum Aufheben"/>
+		<text name="ahl_husbandryFull" text="Dieser Stall ist voll"/>
+		<text name="ahl_notEnoughSpace" text="Nicht genug Platz in diesem Stall für alle Tiere im Anhänger"/>
 		<text name="ahl_carriedAnimal" text="Getragenes Tier"/>
 		<text name="ahl_feedBucket" text="Futterbehälter"/>
 		<text name="ahl_function_bucket" text="Mit einem Futterschaufel können Sie Tiere zu sich herantreiben."/>

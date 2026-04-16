@@ -55,9 +55,9 @@ Follow the development progress and known issues on the Trello board:
 
 | Action | Default Binding | Description |
 |--------|----------------|-------------|
-| Start/Stop Herding | `Left Shift + N` | Toggle herding while inside a husbandry |
+| Start/Stop Herding | `Left Shift + N` | Toggle herding while inside a husbandry(On Foot) |
 | Pickup Animal | `E` (Interact) | Pick up a nearby young/light animal |
-| Unload Trailer | `Left Shift + U` | Unload a livestock trailer parked in a husbandry |
+| Unload Trailer | `Left Shift + U` | Unload a livestock trailer parked in a husbandry(On Foot) |
 
 ---
 
@@ -67,7 +67,7 @@ Follow the development progress and known issues on the Trello board:
 |-----|--------|
 | [RealisticLivestock (RLRM)](https://github.com/rittermod/FS25_RealisticLivestockRM) | **Required** -- breed visuals, ear tags, weight-based pickup, full animal info display |
 | MoreVisualAnimals | Compatible |
-| Animal Package Vanilla Edition | Unknown -- needs testing |
+| Animal Package Vanilla Edition | Not Working -- needs testing |
 
 ---
 

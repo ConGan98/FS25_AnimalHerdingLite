@@ -8,13 +8,13 @@ function Animal:getCanBePickedUp()
 	end
 
 	if animalTypeIndex == AnimalType.HORSE then return false end
-	if animalTypeIndex == AnimalType.CHICKEN then return true end
+	if animalTypeIndex == AnimalType.CHICKEN then return self.age < 60 end
 
 	if self.weight > 100 then return false end
 
-	if animalTypeIndex == AnimalType.COW then return self.age < 6 end
-	if animalTypeIndex == AnimalType.PIG then return self.age < 6 end
-	if animalTypeIndex == AnimalType.SHEEP then return self.age < 6 end
+	if animalTypeIndex == AnimalType.COW then return self.age < 3 end
+	if animalTypeIndex == AnimalType.PIG then return self.age < 3 end
+	if animalTypeIndex == AnimalType.SHEEP then return self.age < 3 end
 
 	return true
 

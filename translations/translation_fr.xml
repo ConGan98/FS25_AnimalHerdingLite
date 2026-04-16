@@ -4,6 +4,12 @@
 		<text name="ahl_stopHerding" text="Arrêtez de rassembler"/>
 		<text name="ahl_herdedAnimal" text="Animal en troupeau"/>
 		<text name="ahl_pickupAnimal" text="Ramassage d'animaux"/>
+		<text name="ahl_returnAnimal" text="Remettre l'animal"/>
+		<text name="ahl_wrongHusbandryType" text="Cet élevage n'accepte pas ce type d'animal"/>
+		<text name="ahl_tooOldToPickup" text="Cet animal est trop vieux pour être ramassé"/>
+		<text name="ahl_tooHeavyToPickup" text="Cet animal est trop lourd pour être ramassé"/>
+		<text name="ahl_husbandryFull" text="Cet élevage est plein"/>
+		<text name="ahl_notEnoughSpace" text="Pas assez de place dans cet élevage pour tous les animaux de la remorque"/>
 		<text name="ahl_carriedAnimal" text="Animal transporté"/>
 		<text name="ahl_feedBucket" text="Seau à Nourriture"/>
 		<text name="ahl_function_bucket" text="Un seau à nourriture peut être utilisé pour rassembler les animaux vers vous."/>

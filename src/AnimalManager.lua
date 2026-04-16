@@ -133,6 +133,11 @@ function AnimalManager:update(dT)
 
             local farmId = husbandry:getOwnerFarmId()
             if farms[farmId] == nil then continue end
+
+            local farm = farms[farmId]
+            local matchesType = husbandry:getAnimalTypeIndex() == farm.animalTypeIndex
+
+            if not matchesType then continue end
             if husbandry:getNumOfFreeAnimalSlots() <= 0 then continue end
 
             if placeables[farmId] == nil then placeables[farmId] = {} end
@@ -198,6 +203,19 @@ function AnimalManager:update(dT)
                         ["placeable"] = hitPlaceable
                     })
                     continue
+                end
+
+                -- Warn if a herded animal is inside a wrong-type husbandry
+                local ax, az = animal.position.x, animal.position.z
+                for _, h in pairs(g_currentMission.husbandrySystem.placeables) do
+                    if h:getOwnerFarmId() == farmId and h:getAnimalTypeIndex() ~= farm.animalTypeIndex and h:getIsInAnimalDeliveryArea(ax, az) then
+                        local now = g_time or 0
+                        if self.herdingMismatchWarningTime == nil or now - self.herdingMismatchWarningTime > 5000 then
+                            self.herdingMismatchWarningTime = now
+                            g_currentMission:showBlinkingWarning(g_i18n:getText("ahl_wrongHusbandryType", modName), 3000)
+                        end
+                        break
+                    end
                 end
 
             end
@@ -290,16 +308,39 @@ function AnimalManager:update(dT)
                 local carriedAnimal = carriedAnimals[i]
                 local handTool = carriedAnimal.handTool
                 local farmId = handTool:getOwnerFarmId()
-                local husbandry = self:getHusbandryInRange(carriedAnimal.player.rootNode, handTool:getAnimalTypeIndex(), farmId)
+                local animalTypeIndex = handTool:getAnimalTypeIndex()
+                local husbandry = self:getHusbandryInRange(carriedAnimal.player.rootNode, animalTypeIndex, farmId)
 
                 if husbandry == nil and carriedAnimal.placeable ~= nil then
                     carriedAnimal.leaveTimer = carriedAnimal.leaveTimer + 1
                     if carriedAnimal.leaveTimer >= 50 then carriedAnimal.placeable = nil end
                 end
 
+                -- Warn the player if they are inside a husbandry that doesn't match the carried animal type
+                if husbandry == nil then
+                    local px, _, pz = getWorldTranslation(carriedAnimal.player.rootNode)
+                    for _, h in pairs(g_currentMission.husbandrySystem.placeables) do
+                        if h:getOwnerFarmId() == farmId and h:getAnimalTypeIndex() ~= animalTypeIndex and h:getIsInAnimalDeliveryArea(px, pz) then
+                            local now = g_time or 0
+                            if self.carriedMismatchWarningTime == nil or now - self.carriedMismatchWarningTime > 5000 then
+                                self.carriedMismatchWarningTime = now
+                                g_currentMission:showBlinkingWarning(g_i18n:getText("ahl_wrongHusbandryType", modName), 3000)
+                            end
+                            break
+                        end
+                    end
+                end
+
                 if husbandry == nil or husbandry:getUniqueId() == carriedAnimal.placeable then continue end
 
-                if husbandry:getNumOfFreeAnimalSlots() <= 0 then continue end
+                if husbandry:getNumOfFreeAnimalSlots() <= 0 then
+                    local now = g_time or 0
+                    if self.carriedFullWarningTime == nil or now - self.carriedFullWarningTime > 5000 then
+                        self.carriedFullWarningTime = now
+                        g_currentMission:showBlinkingWarning(g_i18n:getText("ahl_husbandryFull", modName), 3000)
+                    end
+                    continue
+                end
 
                 local animal = handTool:getAnimal()
 
@@ -454,6 +495,18 @@ function AnimalManager:applyRLVisuals(animal)
     end
 
     animal.rlVisualAnimal = va
+
+end
+
+
+function AnimalManager:returnAllCarriedAnimals()
+
+    if not self.isServer then return end
+
+    for i = #self.carriedAnimals, 1, -1 do
+        local entry = self.carriedAnimals[i]
+        self:returnCarriedAnimalToHusbandry(entry.handTool)
+    end
 
 end
 
@@ -1507,6 +1560,81 @@ function AnimalManager:addCarriedAnimalToPlayer(player, handTool, placeable)
 end
 
 
+function AnimalManager:returnCarriedAnimalToHusbandry(handTool)
+
+    local animal = handTool:getAnimal()
+    local animalTypeIndex = handTool:getAnimalTypeIndex()
+    local farmId = handTool:getOwnerFarmId()
+
+    if animal == nil then
+        Logging.warning("[AHL] returnCarriedAnimalToHusbandry: no animal on hand tool")
+        return false
+    end
+
+    -- Find the original placeable ID from the carried animals list
+    local originalPlaceableId = nil
+    for _, entry in ipairs(self.carriedAnimals) do
+        if entry.handTool == handTool then
+            originalPlaceableId = entry.placeable
+            break
+        end
+    end
+
+    -- Find the original husbandry by unique ID (ignore capacity — must not lose the animal)
+    local targetPlaceable = nil
+    local husbandries = g_currentMission.husbandrySystem:getPlaceablesByFarm(farmId, animalTypeIndex)
+
+    if originalPlaceableId ~= nil then
+        for _, husbandry in pairs(husbandries) do
+            if husbandry:getUniqueId() == originalPlaceableId then
+                targetPlaceable = husbandry
+                break
+            end
+        end
+    end
+
+    -- Fallback: closest compatible husbandry (ignore capacity to guarantee the animal is not lost)
+    if targetPlaceable == nil then
+        local px, _, pz = getWorldTranslation(g_localPlayer.rootNode)
+        local bestDist = math.huge
+        for _, husbandry in pairs(husbandries) do
+            local hx, _, hz = getWorldTranslation(husbandry.rootNode)
+            local dist = MathUtil.vector2Length(px - hx, pz - hz)
+            if dist < bestDist then
+                targetPlaceable = husbandry
+                bestDist = dist
+            end
+        end
+    end
+
+    if targetPlaceable == nil then
+        Logging.warning("[AHL] returnCarriedAnimalToHusbandry: no valid husbandry found for farmId=%s animalTypeIndex=%s", tostring(farmId), tostring(animalTypeIndex))
+        return false
+    end
+
+    if self:getHasHusbandryConflict() then animal.idFull, animal.id = nil, nil end
+
+    targetPlaceable:addCluster(animal)
+
+    -- Flush immediately so the cluster is in the husbandry data before the save writes
+    local clusterSystem = targetPlaceable:getClusterSystem()
+    if clusterSystem ~= nil then clusterSystem:updateNow() end
+
+    -- Remove from carried animals list
+    for i = #self.carriedAnimals, 1, -1 do
+        if self.carriedAnimals[i].handTool == handTool then
+            table.remove(self.carriedAnimals, i)
+            break
+        end
+    end
+
+    g_currentMission.handToolSystem:markHandToolForDeletion(handTool)
+
+    return true
+
+end
+
+
 function AnimalManager:addHandToolToSetOnPostLoad(handTool)
 
     table.insert(self.handToolsPostLoad, handTool)
@@ -1538,6 +1666,24 @@ function AnimalManager:unloadTrailerIntoHusbandry(farmId, trailer, husbandry)
 
     local clusters = clusterSystem:getClusters()
     if clusters == nil or #clusters == 0 then return end
+
+    local freeSlots = husbandry:getNumOfFreeAnimalSlots()
+
+    if freeSlots <= 0 then
+        g_currentMission:showBlinkingWarning(g_i18n:getText("ahl_husbandryFull", modName), 3000)
+        return
+    end
+
+    -- Count total animals in the trailer
+    local totalAnimalsInTrailer = 0
+    for _, cluster in ipairs(clusters) do
+        totalAnimalsInTrailer = totalAnimalsInTrailer + (cluster.numAnimals or 1)
+    end
+
+    if totalAnimalsInTrailer > freeSlots then
+        g_currentMission:showBlinkingWarning(g_i18n:getText("ahl_notEnoughSpace", modName), 3000)
+        return
+    end
 
     -- Copy array first: addPendingRemoveCluster modifies the underlying table during iteration
     local clustersToTransfer = {}
