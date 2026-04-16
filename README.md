@@ -9,6 +9,12 @@ A Farming Simulator 25 mod that enables players to physically herd animals outsi
 
 ---
 
+## Requirements
+
+This mod **requires** [RealisticLivestock (RLRM)](https://github.com/rittermod/FS25_RealisticLivestockRM) to be installed and active.
+
+---
+
 ## Features
 
 ### Herding
@@ -21,16 +27,15 @@ A Farming Simulator 25 mod that enables players to physically herd animals outsi
 
 ### Animal Pickup
 - **Carry young/small animals** -- pick up calves, lambs, piglets, and chickens by approaching them and pressing the interact button
-- **Weight-based restrictions** -- with RealisticLivestock enabled, animals must be under 100kg to be picked up
+- **Weight-based restrictions** -- animals must be under 100kg to be picked up
 - **Automatic deposit** -- walk into a compatible husbandry while carrying an animal to deposit it
-- **Full animal info display** -- carried animals show their full info HUD (with RealisticLivestock: breed, unique ID, farm ID, age, birthday, gender, and more)
+- **Full animal info display** -- carried animals show their full info HUD including breed, unique ID, farm ID, age, birthday, gender, and more
 
 ### Livestock Trailer Unload
 - **Manual trailer unloading** -- park a livestock trailer inside a compatible husbandry and press Unload (default: Left Shift + U) to transfer animals directly
 
 ### Multiplayer
-- Full multiplayer support for herding, position sync, and player tracking
-- Animal pickup is currently singleplayer only
+- Multiplayer support is currently **unknown** and needs testing
 
 ---
 
@@ -48,10 +53,9 @@ A Farming Simulator 25 mod that enables players to physically herd animals outsi
 
 | Mod | Status |
 |-----|--------|
-| RealisticLivestock (RLRM) | Fully compatible -- breed visuals, ear tags, weight-based pickup, full animal info display |
+| [RealisticLivestock (RLRM)](https://github.com/rittermod/FS25_RealisticLivestockRM) | **Required** -- breed visuals, ear tags, weight-based pickup, full animal info display |
 | MoreVisualAnimals | Compatible |
-| EnhancedAnimalSystem | Compatible |
-| Animal Package Vanilla Edition | Compatible |
+| Animal Package Vanilla Edition | Unknown -- needs testing |
 
 ---
 
@@ -67,8 +71,9 @@ A Farming Simulator 25 mod that enables players to physically herd animals outsi
 ## Installation
 
 1. Download the latest release
-2. Place the `.zip` file in your Farming Simulator 25 mods folder (`Documents/My Games/FarmingSimulator2025/mods/`)
-3. Enable the mod in the game's mod manager
+2. Install [RealisticLivestock (RLRM)](https://github.com/rittermod/FS25_RealisticLivestockRM) if you haven't already
+3. Place the `.zip` file in your Farming Simulator 25 mods folder (`Documents/My Games/FarmingSimulator2025/mods/`)
+4. Enable both mods in the game's mod manager
 
 ---
 
@@ -89,4 +94,12 @@ A Farming Simulator 25 mod that enables players to physically herd animals outsi
 
 ## License
 
-See the original repository for license information: [FS25_AnimalHerdingLite](https://github.com/Arrow-kb/FS25_AnimalHerdingLite)
+This project is licensed under the [GPL-3.0 License](LICENSE).
+
+### Reuse of Arrow-kb's Original Work
+
+This fork exists with the blessing of the original author. Arrow-kb's statement regarding continued development:
+
+> *"Due to several factors (mainly due to a long persistent trend of difficulty with GIANTS Software), development and maintenance of all my mods are hereby ceased. I have removed all my mods from the GIANTS ModHub, and no further development will be supported on any platform.*
+>
+> *For certain mods, I will be uploading my private development versions to their respective GitHub projects. Anyone who wishes to continue development or maintenance of any mod is allowed to do so, and upload it to the ModHub, with appropriate credit. Any questions related to continued development can be directed to arrow_kb on discord."*
