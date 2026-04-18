@@ -28,12 +28,17 @@ PlayerInputComponent.registerGlobalPlayerActionEvents = Utils.appendedFunction(P
 
     local _, eventId = g_inputBinding:registerActionEvent(InputAction.HerdingLite, AnimalManager, AnimalManager.onToggleHerding, false, true, false, true, nil, false)
 
+    if g_animalManager.animDebugEnabled then
+        Logging.info("[AHL] registerGlobalPlayerActionEvents → HerdingLite eventId=%s (prev=%s)", tostring(eventId), tostring(g_animalManager.herdingEventId))
+    end
+
     g_animalManager.herdingEventId = eventId
     g_animalManager.herdingStartText = g_i18n:getText("ahl_startHerding")
     g_animalManager.herdingStopText = g_i18n:getText("ahl_stopHerding")
     g_inputBinding:setActionEventTextPriority(eventId, GS_PRIO_VERY_HIGH)
 	g_inputBinding:setActionEventText(eventId, g_animalManager.herdingEnabled and g_animalManager.herdingStopText or g_animalManager.herdingStartText)
     g_inputBinding:setActionEventActive(eventId, true)
+    g_inputBinding:setActionEventTextVisibility(eventId, true)
 
     if g_animalManager.unloadTrailerEventId == nil then
         local _, unloadEventId = g_inputBinding:registerActionEvent(InputAction.HerdingLiteUnload, AnimalManager, AnimalManager.onUnloadTrailer, false, true, false, true, nil, false)
@@ -42,6 +47,15 @@ PlayerInputComponent.registerGlobalPlayerActionEvents = Utils.appendedFunction(P
         g_inputBinding:setActionEventText(unloadEventId, g_i18n:getText("ahl_unloadTrailer"))
     end
     g_inputBinding:setActionEventActive(g_animalManager.unloadTrailerEventId, false)
+
+    if g_dogHerding ~= nil then
+        local _, dogEventId = g_inputBinding:registerActionEvent(InputAction.HerdingLiteDog, DogHerding, DogHerding.onToggleDogHerding, false, true, false, true, nil, false)
+        g_dogHerding.dogEventId = dogEventId
+        g_inputBinding:setActionEventTextPriority(dogEventId, GS_PRIO_VERY_HIGH)
+        g_inputBinding:setActionEventText(dogEventId, g_i18n:getText("ahl_sendDog", modName))
+        g_inputBinding:setActionEventActive(dogEventId, false)
+        g_inputBinding:setActionEventTextVisibility(dogEventId, false)
+    end
 
 end)
 
@@ -57,8 +71,46 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
         or g_server.netIsRunning
     then return end
 
-    -- When carrying an animal, show the return prompt instead of pickup detection
+    -- When carrying an animal, auto-load into a nearby compatible trailer; otherwise show the return prompt
     if self.player:getIsCarryingAnimal() then
+
+        local currentHandTool = self.player:getHeldHandTool()
+        local handToolAnimalTypeIndex = currentHandTool ~= nil and currentHandTool.getAnimalTypeIndex ~= nil and currentHandTool:getAnimalTypeIndex() or nil
+
+        if currentHandTool ~= nil and handToolAnimalTypeIndex ~= nil then
+
+            local TRAILER_AUTOLOAD_RANGE = 4
+            local carriedFarmId = self.player.farmId
+            local px, _, pz = getWorldTranslation(self.player.rootNode)
+            local animalCluster = currentHandTool:getAnimal()
+            local numNeeded = (animalCluster ~= nil and animalCluster.numAnimals) or 1
+
+            for _, vehicle in ipairs(g_currentMission.vehicleSystem.vehicles) do
+                if vehicle.spec_livestockTrailer == nil then continue end
+                if vehicle:getOwnerFarmId() ~= carriedFarmId then continue end
+                if vehicle.getSupportsAnimalType ~= nil and not vehicle:getSupportsAnimalType(handToolAnimalTypeIndex) then continue end
+
+                local currentType = vehicle:getCurrentAnimalType()
+                if currentType ~= nil and currentType.typeIndex ~= handToolAnimalTypeIndex then continue end
+
+                local tx, _, tz = getWorldTranslation(vehicle.rootNode)
+                if MathUtil.vector2Length(px - tx, pz - tz) > TRAILER_AUTOLOAD_RANGE then continue end
+
+                local freeSlots = 0
+                if animalCluster ~= nil and animalCluster.subTypeIndex ~= nil and vehicle.getNumOfFreeAnimalSlots ~= nil then
+                    freeSlots = vehicle:getNumOfFreeAnimalSlots(animalCluster.subTypeIndex)
+                else
+                    local animalType = g_currentMission.animalSystem:getTypeByIndex(handToolAnimalTypeIndex)
+                    freeSlots = vehicle:getMaxNumOfAnimals(animalType) - vehicle:getNumOfAnimals()
+                end
+                if freeSlots < numNeeded then continue end
+
+                g_animalManager:loadCarriedAnimalIntoTrailer(currentHandTool, vehicle)
+                return
+            end
+
+        end
+
         self.animalPickup = { ["return"] = true }
         g_inputBinding:setActionEventText(self.enterActionId, g_i18n:getText("ahl_returnAnimal"))
         g_inputBinding:setActionEventActive(self.enterActionId, true)
@@ -199,6 +251,7 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
 
             if g_animalManager:getHasHusbandryConflict() then
                 -- RL: animalIdToCluster is [index] → { [animalId] → cluster }
+                if clusterHusbandry.animalIdToCluster == nil then continue end
                 for i, animalIds in pairs(clusterHusbandry.animalIdToCluster) do
                     local hId = clusterHusbandry.husbandryIds[i]
                     if hId == nil then continue end
@@ -215,7 +268,7 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
             else
                 -- Vanilla: animalIdToCluster is [animalId] → cluster
                 local hId = clusterHusbandry.husbandryId
-                if hId ~= nil then
+                if hId ~= nil and clusterHusbandry.animalIdToCluster ~= nil then
                     for animalId, cluster in pairs(clusterHusbandry.animalIdToCluster) do
                         local ax, _, az = getAnimalPosition(hId, animalId)
                         local dist = MathUtil.vector2Length(px - ax, pz - az)

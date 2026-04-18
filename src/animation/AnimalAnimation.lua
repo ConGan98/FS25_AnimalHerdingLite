@@ -130,30 +130,32 @@ function AnimalAnimation:update(dT, isWalkingFromPlayer)
 			--self.turnDirection = dirChange > 0 and "left" or (dirChange < 0 and "right" or "none")
 		--end
 
+		local names = self.animal.animNames
+
 		if state.isIdle and state.wasWalking then
-				
+
 			state.wasWalking = false
-			self:startTransition("walk", "idle", "walk1", "idle1")
+			self:startTransition("walk", "idle", names.walk, names.idle)
 
 		elseif state.isWalking and state.wasIdle then
-				
+
 			state.wasIdle = false
-			self:startTransition("idle", "walk", "idle1", "walk1")
+			self:startTransition("idle", "walk", names.idle, names.walk)
 
 		elseif state.isRunning and state.wasWalking then
 
 			state.wasWalking = false
-			self:startTransition("walk", "run", "walk1", "run1")
+			self:startTransition("walk", "run", names.walk, names.run)
 
 		elseif state.isWalking and state.wasRunning then
 
 			state.wasRunning = false
-			self:startTransition("run", "walk", "run1", "walk1")
+			self:startTransition("run", "walk", names.run, names.walk)
 
 		elseif state.isIdle and state.wasRunning then
 
 			state.wasRunning = false
-			self:startTransition("run", "idle", "run1", "idle1")
+			self:startTransition("run", "idle", names.run, names.idle)
 
 		elseif state.isIdle then
 
@@ -311,6 +313,16 @@ function AnimalAnimation:update(dT, isWalkingFromPlayer)
 end
 
 
+local ALTERNATE_NAMES = {
+	["walk1"] = "walk01", ["walk01"] = "walk1",
+	["run1"] = "run01", ["run01"] = "run1",
+	["idle1"] = "idle01", ["idle01"] = "idle1",
+	["walk2"] = "walk02", ["walk02"] = "walk2",
+	["run2"] = "run02", ["run02"] = "run2",
+	["idle2"] = "idle02", ["idle02"] = "idle2",
+}
+
+
 function AnimalAnimation:getRandomAnimation(id)
 
 	local state = self.cache.states[id]
@@ -319,6 +331,7 @@ function AnimalAnimation:getRandomAnimation(id)
 
 	if state[id] ~= nil then return state[id] end
 	if state[id .. "1"] ~= nil then return state[id .. "1"] end
+	if state[id .. "01"] ~= nil then return state[id .. "01"] end
 
 	local numAnimations = 0
 
@@ -409,9 +422,9 @@ function AnimalAnimation:startTransition(stateIdFrom, stateIdTo, idFrom, idTo)
 
 	if states[stateIdFrom] == nil or states[stateIdTo] == nil then return end
 
-	local animationFrom = states[stateIdFrom][idFrom]
+	local animationFrom = states[stateIdFrom][idFrom] or states[stateIdFrom][ALTERNATE_NAMES[idFrom]]
 	if animationFrom == nil then animationFrom = self:getRandomAnimation(stateIdFrom) end
-	local animationTo = states[stateIdTo][idTo]
+	local animationTo = states[stateIdTo][idTo] or states[stateIdTo][ALTERNATE_NAMES[idTo]]
 	if animationTo == nil then animationTo = self:getRandomAnimation(stateIdTo) end
 
 	if animationTo == nil or animationFrom == nil then return end

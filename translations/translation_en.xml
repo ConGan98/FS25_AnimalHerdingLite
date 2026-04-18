@@ -16,7 +16,13 @@
 		<text name="ahl_notInHusbandry" text="You must be inside a husbandry to start herding."/>
 		<text name="ahl_unloadTrailer" text="Unload Trailer"/>
 		<text name="ahl_trailerTypeMismatch" text="Animals in trailer do not match this husbandry"/>
-		<text name="input_HerdingLite" text=""/>
+		<text name="ahl_sendDog" text="Call Dog"/>
+		<text name="ahl_recallDog" text="Send Dog home"/>
+		<text name="ahl_noDog" text="You don't have a dog. Purchase one from the store."/>
+		<text name="ahl_startDogHerding" text="Start Dog Herding"/>
+		<text name="ahl_stopDogHerding" text="Stop Dog Herding"/>
+		<text name="input_HerdingLite" text="Start Herding"/>
 		<text name="input_HerdingLiteUnload" text="Unload Trailer Into Husbandry"/>
+		<text name="input_HerdingLiteDog" text="Toggle Dog Herding"/>
 	</texts>
 </l10n>

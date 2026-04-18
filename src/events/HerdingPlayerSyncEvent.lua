@@ -38,8 +38,9 @@ function HerdingPlayerSyncEvent:readStream(streamId, connection)
             local x = streamReadFloat32(streamId)
             local z = streamReadFloat32(streamId)
             local hasBucket = streamReadBool(streamId)
+            local isVehicle = streamReadBool(streamId)
 
-            table.insert(positions, { x, z, hasBucket })
+            table.insert(positions, { x, z, hasBucket, isVehicle })
 
         end
 
@@ -72,6 +73,7 @@ function HerdingPlayerSyncEvent:writeStream(streamId, connection)
             streamWriteFloat32(streamId, position[1])
             streamWriteFloat32(streamId, position[2])
             streamWriteBool(streamId, position[3]) -- is carrying feed bucket
+            streamWriteBool(streamId, position[4] or false) -- is vehicle
 
         end
 

@@ -16,6 +16,9 @@ function AnimalManager.new()
 
 	self.debugEnabled = false
 	self.collisionDebugEnabled = false
+	self.animDebugEnabled = false
+	self.animDebugTimer = 0
+	self.lastGuiName = nil
 	self.cache = {}
     self.farms = {}
     self.husbandries = {}
@@ -42,6 +45,10 @@ function AnimalManager.new()
 
 	addConsoleCommand("toggleAnimalDebug", "Toggle animal debug mode", "consoleCommandToggleDebug", AnimalManager)
 	addConsoleCommand("toggleAnimalCollisionDebug", "Toggle animal collision type debug overlay", "consoleCommandToggleCollisionDebug", AnimalManager)
+	addConsoleCommand("toggleAnimalAnimDebug", "Toggle logging of each herded animal's current animation clip and speed", "consoleCommandToggleAnimDebug", AnimalManager)
+	addConsoleCommand("dumpAnimalAnimCache", "Dump all animation IDs/clips available per herded animal", "consoleCommandDumpAnimCache", AnimalManager)
+	addConsoleCommand("dumpHerdingInputState", "Dump herding input event state and husbandry range result", "consoleCommandDumpInputState", AnimalManager)
+	addConsoleCommand("refreshHerdingPrompt", "Force-refresh the herding action-event state now", "consoleCommandRefreshPrompt", AnimalManager)
 
     _G[modName].ClassUtil = ClassUtil
 
@@ -51,6 +58,17 @@ end
 
 
 function AnimalManager:update(dT)
+
+    if self.animDebugEnabled then
+        self.animDebugTimer = self.animDebugTimer + dT
+        if self.animDebugTimer >= 1000 then
+            self.animDebugTimer = 0
+            self:logAnimDebug()
+        end
+    end
+
+    self:checkAnimalDialogStop()
+    self:checkInputContextChange()
 
     if g_localPlayer ~= nil then
 
@@ -63,12 +81,15 @@ function AnimalManager:update(dT)
                 local text = g_i18n:getText(herdingActive and "ahl_stopHerding" or "ahl_startHerding", modName)
                 g_inputBinding:setActionEventText(self.herdingEventId, text)
                 g_inputBinding:setActionEventActive(self.herdingEventId, true)
-                self.ticksSinceLastHusbandryCheck = 74
+                g_inputBinding:setActionEventTextVisibility(self.herdingEventId, true)
                 -- reset unload event so the update loop re-evaluates it next tick
                 if self.unloadTrailerEventId ~= nil then
                     g_inputBinding:setActionEventActive(self.unloadTrailerEventId, false)
                 end
             end
+            -- Force husbandry re-check on any vehicle-context change (enter, exit,
+            -- or tab between vehicles) so the prompt state tracks the new position.
+            self.ticksSinceLastHusbandryCheck = 75
             self.lastControlledVehicle = controlledVehicle
         end
 
@@ -83,9 +104,17 @@ function AnimalManager:update(dT)
                 local husbandry = self:getHusbandryInRange()
                 local inRange = husbandry ~= nil
 
+                -- Mutual exclusion: hide the regular herding prompt while dog
+                -- herding is active so the player can only stop via LSHIFT+B.
+                if g_dogHerding ~= nil and g_dogHerding:isLocalActive() then
+                    inRange = false
+                end
+
                 g_inputBinding:setActionEventActive(self.herdingEventId, inRange)
+                g_inputBinding:setActionEventTextVisibility(self.herdingEventId, inRange)
                 if self.herdingVehicleEventId ~= nil then
                     g_inputBinding:setActionEventActive(self.herdingVehicleEventId, inRange)
+                    g_inputBinding:setActionEventTextVisibility(self.herdingVehicleEventId, inRange)
                 end
 
                 if inRange then
@@ -93,6 +122,10 @@ function AnimalManager:update(dT)
                     if self.herdingVehicleEventId ~= nil then
                         g_inputBinding:setActionEventText(self.herdingVehicleEventId, g_i18n:getText("ahl_startHerding", modName))
                     end
+                end
+
+                if self.animDebugEnabled then
+                    print(string.format("[AHL prompt] 75-tick check: inRange=%s footId=%s vehId=%s", tostring(inRange), tostring(self.herdingEventId), tostring(self.herdingVehicleEventId)))
                 end
 
 
@@ -179,12 +212,29 @@ function AnimalManager:update(dT)
 
     end
 
+    local NEIGHBOR_CELL = 8
+    local dtSec = dT * 0.001
+
     for farmId, farm in pairs(farms) do
 
         local animalsToRemove = {}
         local farmPlaceables
         local farmTrailers
         local players = farm.players
+
+        -- Per-farm spatial hash for flocking neighbor queries
+        local animalGrid = {}
+        for _, a in ipairs(farm.animals) do
+            local cxg = math.floor(a.position.x / NEIGHBOR_CELL)
+            local czg = math.floor(a.position.z / NEIGHBOR_CELL)
+            local k = cxg * 65536 + czg
+            local cell = animalGrid[k]
+            if cell == nil then
+                cell = {}
+                animalGrid[k] = cell
+            end
+            cell[#cell + 1] = a
+        end
 
         if updateRelativeToPlaceables then
             farmPlaceables = placeables[farmId]
@@ -241,7 +291,32 @@ function AnimalManager:update(dT)
             end
 
             if not loadedIntoTrailer then
-                animal:updateRelativeToPlayers(players, updateRelativeToPlayers)
+                -- Query same-farm neighbors from spatial hash for flocking.
+                local neighbors = {}
+                do
+                    local cxg = math.floor(animal.position.x / NEIGHBOR_CELL)
+                    local czg = math.floor(animal.position.z / NEIGHBOR_CELL)
+                    for ox = -1, 1 do
+                        for oz = -1, 1 do
+                            local cell = animalGrid[(cxg + ox) * 65536 + (czg + oz)]
+                            if cell ~= nil then
+                                for _, o in ipairs(cell) do
+                                    if o ~= animal then neighbors[#neighbors + 1] = o end
+                                end
+                            end
+                        end
+                    end
+                end
+                -- Stash for animal:update() so its front-neighbor yield can reuse
+                -- the same list without a second spatial-hash query.
+                animal._frameNeighbors = neighbors
+
+                -- Dog herding is wired in entirely through the influence list
+                -- (see AnimalManager:updatePlayerPositions -> g_dogHerding:getInfluencers).
+                -- No per-animal overrides: the arousal / nearest-threat / vehicle-
+                -- multiplier pipeline that handles regular herding produces the
+                -- correct behavior for dog herding too.
+                animal:updateRelativeToPlayers(players, updateRelativeToPlayers, dtSec, neighbors)
                 animal:update(dT)
             end
 
@@ -260,12 +335,34 @@ function AnimalManager:update(dT)
                 local minSep = a.collisionController.radius + b.collisionController.radius + 0.3
                 if distSq < minSep * minSep and distSq > 0.0001 then
                     local dist = math.sqrt(distSq)
-                    local push = (minSep - dist) * 0.5
+                    local overlap = minSep - dist
                     local nx, nz = dx / dist, dz / dist
-                    a.position.x = a.position.x + nx * push
-                    a.position.z = a.position.z + nz * push
-                    b.position.x = b.position.x - nx * push
-                    b.position.z = b.position.z - nz * push
+
+                    -- Velocity-weighted split: the animal that actually moved this
+                    -- frame absorbs most of the correction. A stationary grazer keeps
+                    -- its position when a walker bumps it.
+                    local mvAx = a.position.x - (a.lastPosition and a.lastPosition.x or a.position.x)
+                    local mvAz = a.position.z - (a.lastPosition and a.lastPosition.z or a.position.z)
+                    local mvBx = b.position.x - (b.lastPosition and b.lastPosition.x or b.position.x)
+                    local mvBz = b.position.z - (b.lastPosition and b.lastPosition.z or b.position.z)
+                    local mvA = math.sqrt(mvAx * mvAx + mvAz * mvAz)
+                    local mvB = math.sqrt(mvBx * mvBx + mvBz * mvBz)
+                    local total = mvA + mvB
+
+                    local shareA, shareB
+                    if total < 0.0001 then
+                        shareA, shareB = 0.5, 0.5
+                    else
+                        -- Each animal absorbs push proportional to the OTHER's motion
+                        -- (moved more → absorbs less of the correction from the stationary one).
+                        shareA = mvA / total
+                        shareB = mvB / total
+                    end
+
+                    a.position.x = a.position.x + nx * overlap * shareA
+                    a.position.z = a.position.z + nz * overlap * shareA
+                    b.position.x = b.position.x - nx * overlap * shareB
+                    b.position.z = b.position.z - nz * overlap * shareB
                     a:updatePosition()
                     b:updatePosition()
                 end
@@ -309,7 +406,9 @@ function AnimalManager:update(dT)
                 local handTool = carriedAnimal.handTool
                 local farmId = handTool:getOwnerFarmId()
                 local animalTypeIndex = handTool:getAnimalTypeIndex()
-                local husbandry = self:getHusbandryInRange(carriedAnimal.player.rootNode, animalTypeIndex, farmId)
+                -- Carried animals must physically enter the delivery area to deposit;
+                -- no foot-radius fallback here (pass 0).
+                local husbandry = self:getHusbandryInRange(carriedAnimal.player.rootNode, animalTypeIndex, farmId, 0)
 
                 if husbandry == nil and carriedAnimal.placeable ~= nil then
                     carriedAnimal.leaveTimer = carriedAnimal.leaveTimer + 1
@@ -511,6 +610,18 @@ function AnimalManager:returnAllCarriedAnimals()
 end
 
 
+function AnimalManager:returnAllHerdedAnimals()
+
+    if not self.isServer then return end
+
+    local farmIds = {}
+    for farmId, _ in pairs(self.farms) do table.insert(farmIds, farmId) end
+
+    for _, farmId in ipairs(farmIds) do self:stopHerding(farmId) end
+
+end
+
+
 function AnimalManager:save(filename)
 
     if not self.isServer then return end
@@ -570,6 +681,7 @@ function AnimalManager:load()
             local animal, navMeshAgent = self:createHerdableAnimalFromData(animalTypeIndex, visualAnimalIndex, tiles)
             animal:setHotspotFarmId(farmId)
             animal:loadFromXMLFile(xmlFile, animalKey, AnimalManager.CONFLICTS.REALISTIC_LIVESTOCK)
+            animal:applyAnimationNames()
             animal:createCollisionController(navMeshAgent.height, navMeshAgent.radius, animalTypeIndex)
 		    animal:updatePosition()
 		    animal:updateRotation()
@@ -623,16 +735,26 @@ function AnimalManager:updatePlayerPositions()
     local players = g_currentMission.playerSystem.players
     local positions = {}
 
+    -- Dog herding owns the influence channel when active on a farm: the
+    -- DogHerding module synthesises its own influencer list (dog body + eye
+    -- tip, mode-dependent) and the player / vehicle loops are skipped for
+    -- those farms entirely. This is the single integration point between
+    -- dog herding and the general-herding pipeline.
+    local function isFarmDogHerding(farmId)
+        return g_dogHerding ~= nil and g_dogHerding:isActive(farmId)
+    end
+
     for _, player in pairs(players) do
 
         local farmId = player.farmId
 
         if self.farms[farmId] == nil then continue end
+        if isFarmDogHerding(farmId) and not self:getIsPlayerCarryingBucket(player) then continue end
 
         if positions[farmId] == nil then positions[farmId] = {} end
 
         local x, _, z = player:getPosition()
-        table.insert(positions[farmId], { x, z, self:getIsPlayerCarryingBucket(player) })
+        table.insert(positions[farmId], { x, z, self:getIsPlayerCarryingBucket(player), false })
 
     end
 
@@ -646,12 +768,27 @@ function AnimalManager:updatePlayerPositions()
 
         local farmId = player.farmId
         if self.farms[farmId] == nil then continue end
+        if isFarmDogHerding(farmId) then continue end
 
         if positions[farmId] == nil then positions[farmId] = {} end
 
         local x, _, z = getWorldTranslation(vehicle.rootNode)
-        table.insert(positions[farmId], { x, z, false })
+        table.insert(positions[farmId], { x, z, false, true })
 
+    end
+
+    -- Dog herding: for each active farm, append the dog's influencers (dog
+    -- body + optional eye tip). getInfluencers returns [] during CAST and
+    -- LIE_DOWN so no pressure is applied during those modes.
+    if g_dogHerding ~= nil then
+        for farmId, _ in pairs(self.farms) do
+            if isFarmDogHerding(farmId) then
+                if positions[farmId] == nil then positions[farmId] = {} end
+                for _, p in ipairs(g_dogHerding:getInfluencers(farmId)) do
+                    table.insert(positions[farmId], p)
+                end
+            end
+        end
     end
 
     self.playerPositions = positions
@@ -1213,9 +1350,24 @@ function AnimalManager:loadAnimations(filename, animationSet, useSkeleton)
 end
 
 
-function AnimalManager:getHusbandryInRange(node, animalTypeIndex, farmId)
+-- footRange: optional distance (meters) fallback used when on foot if the player is
+-- outside every husbandry delivery-area polygon. Defaults to 15m for the herding prompt
+-- detection (forgiving near teleports). Pass 0 to require the player to physically be
+-- inside a delivery area (e.g. for carried-animal auto-deposit).
+function AnimalManager:getHusbandryInRange(node, animalTypeIndex, farmId, footRange)
 
-    local husbandries = g_currentMission.husbandrySystem:getPlaceablesByFarm(farmId, animalTypeIndex)
+    if farmId == nil and g_localPlayer ~= nil then farmId = g_localPlayer.farmId end
+
+    local husbandries
+    if animalTypeIndex ~= nil then
+        husbandries = g_currentMission.husbandrySystem:getPlaceablesByFarm(farmId, animalTypeIndex)
+    else
+        -- No animal type specified — gather all owned husbandries across types.
+        husbandries = {}
+        for _, placeable in pairs(g_currentMission.husbandrySystem.placeables) do
+            if placeable:getOwnerFarmId() == farmId then table.insert(husbandries, placeable) end
+        end
+    end
 
     local inVehicle = false
     if node == nil then
@@ -1228,13 +1380,19 @@ function AnimalManager:getHusbandryInRange(node, animalTypeIndex, farmId)
     end
     local x, _, z = getWorldTranslation(node)
 
+    -- Teleports typically drop the player at the husbandry's root node, which can sit
+    -- a few meters outside the delivery-area polygon. Fall back to a short-radius
+    -- distance check on foot so the prompt still activates after teleport.
+    if footRange == nil then footRange = 15 end
+
     for _, husbandry in pairs(husbandries) do
 
         if husbandry:getIsInAnimalDeliveryArea(x, z) then return husbandry end
 
-        if inVehicle then
+        local range = inVehicle and 50 or footRange
+        if range > 0 then
             local hx, _, hz = getWorldTranslation(husbandry.rootNode)
-            if MathUtil.vector2Length(hx - x, hz - z) < 50 then return husbandry end
+            if MathUtil.vector2Length(hx - x, hz - z) < range then return husbandry end
         end
 
     end
@@ -1410,6 +1568,8 @@ function AnimalManager:stopHerding(farmId)
 
     if not self.isServer or not self.herdingEnabled or self.farms[farmId] == nil then return end
 
+    if g_dogHerding ~= nil then g_dogHerding:deactivate(farmId) end
+
     local farm = self.farms[farmId]
     local placeables = g_currentMission.husbandrySystem:getPlaceablesByFarm(farmId, farm.animalTypeIndex)
     local validPlaceables = {}
@@ -1498,13 +1658,21 @@ function AnimalManager:setHerdingInputData()
     local herdingEnabled = self.farms[g_localPlayer.farmId] ~= nil
     local text = g_i18n:getText(herdingEnabled and "ahl_stopHerding" or "ahl_startHerding", modName)
 
-    g_inputBinding:setActionEventActive(self.herdingEventId, herdingEnabled)
+    -- Mutual exclusion: hide the regular herding prompt while dog herding is active.
+    local show = herdingEnabled
+    if g_dogHerding ~= nil and g_dogHerding:isLocalActive() then show = false end
+
+    g_inputBinding:setActionEventActive(self.herdingEventId, show)
+    g_inputBinding:setActionEventTextVisibility(self.herdingEventId, show)
     g_inputBinding:setActionEventText(self.herdingEventId, text)
 
     if self.herdingVehicleEventId ~= nil then
-        g_inputBinding:setActionEventActive(self.herdingVehicleEventId, herdingEnabled)
+        g_inputBinding:setActionEventActive(self.herdingVehicleEventId, show)
+        g_inputBinding:setActionEventTextVisibility(self.herdingVehicleEventId, show)
         g_inputBinding:setActionEventText(self.herdingVehicleEventId, text)
     end
+
+    if g_dogHerding ~= nil then g_dogHerding:setDogInputData() end
 
 end
 
@@ -1635,6 +1803,38 @@ function AnimalManager:returnCarriedAnimalToHusbandry(handTool)
 end
 
 
+function AnimalManager:loadCarriedAnimalIntoTrailer(handTool, trailer)
+
+    local animal = handTool:getAnimal()
+
+    if animal == nil then
+        Logging.warning("[AHL] loadCarriedAnimalIntoTrailer: no animal on hand tool")
+        return false
+    end
+
+    if trailer == nil or trailer.spec_livestockTrailer == nil then
+        Logging.warning("[AHL] loadCarriedAnimalIntoTrailer: invalid trailer")
+        return false
+    end
+
+    if self:getHasHusbandryConflict() then animal.idFull, animal.id = nil, nil end
+
+    trailer:addCluster(animal)
+
+    for i = #self.carriedAnimals, 1, -1 do
+        if self.carriedAnimals[i].handTool == handTool then
+            table.remove(self.carriedAnimals, i)
+            break
+        end
+    end
+
+    g_currentMission.handToolSystem:markHandToolForDeletion(handTool)
+
+    return true
+
+end
+
+
 function AnimalManager:addHandToolToSetOnPostLoad(handTool)
 
     table.insert(self.handToolsPostLoad, handTool)
@@ -1720,6 +1920,144 @@ function AnimalManager.onUnloadTrailer()
 end
 
 
+function AnimalManager:checkAnimalDialogStop()
+
+    if g_gui == nil then return end
+
+    local currentGuiName = g_gui.currentGuiName or ""
+
+    if currentGuiName == self.lastGuiName then return end
+
+    local previousGuiName = self.lastGuiName
+    self.lastGuiName = currentGuiName
+
+    -- When a GUI closes (transitions to empty), the player is returning to gameplay.
+    -- Tab-through-vehicles + teleport-via-map can leave the HerdingLite foot event
+    -- in a broken display state. Nuking and re-registering the event fixes it.
+    if currentGuiName == "" and previousGuiName ~= nil and previousGuiName ~= "" then
+        self:refreshHerdingFootEvent()
+    end
+
+    if currentGuiName == "" then return end
+    if g_localPlayer == nil then return end
+
+    local lower = currentGuiName:lower()
+
+    -- Dog herding is fragile (custom physics + companion animal API). If the player
+    -- opens the in-game/pause menu while dog herding is active, stop it so animals
+    -- return to their husbandry before the player goes idle in menus.
+    if g_dogHerding ~= nil and g_dogHerding:isLocalActive() and lower:find("ingamemenu") ~= nil then
+        g_dogHerding:stopLocal()
+        return
+    end
+
+    if self.farms[g_localPlayer.farmId] == nil then return end
+    if g_client == nil then return end
+
+    -- Ignore in-game menu frames — opening the pause menu to teleport / tab vehicles
+    -- briefly surfaces the last active tab (e.g. InGameMenuAnimalsFrame) as currentGuiName,
+    -- which should not count as entering the husbandry buy/sell dialog.
+    if lower:find("ingamemenu") ~= nil or lower:find("frame") ~= nil then return end
+
+    if lower:find("animal") == nil and lower:find("husbandry") == nil then return end
+
+    Logging.info("[AHL] Animal GUI '%s' opened while herding — returning herded animals", currentGuiName)
+
+    local serverConnection = g_client:getServerConnection()
+    if serverConnection ~= nil then
+        serverConnection:sendEvent(HerdingRequestEvent.new(false, nil, g_localPlayer.farmId))
+    end
+
+end
+
+
+-- Watch for input-context transitions (e.g. tab through vehicles: PLAYER →
+-- VEHICLE → PLAYER). These switches don't surface any GUI, so the GUI-close
+-- hook in checkAnimalDialogStop never fires — yet the foot event's display
+-- state can still get stuck. When the context returns to on-foot, refresh.
+function AnimalManager:checkInputContextChange()
+
+    if g_inputBinding == nil then return end
+    if PlayerInputComponent == nil or PlayerInputComponent.INPUT_CONTEXT_NAME == nil then return end
+    if g_localPlayer == nil then return end
+
+    local currentContext = g_inputBinding:getContextName() or ""
+    if currentContext == self.lastInputContext then return end
+
+    local previousContext = self.lastInputContext
+    self.lastInputContext = currentContext
+
+    -- Refresh whenever we land back on the player input context from some
+    -- other context (vehicle, menu, etc.). Don't gate on herding-active —
+    -- the "start herding" prompt gets stuck too, not just "stop herding".
+    if currentContext == PlayerInputComponent.INPUT_CONTEXT_NAME
+        and previousContext ~= nil and previousContext ~= ""
+        and previousContext ~= PlayerInputComponent.INPUT_CONTEXT_NAME then
+        self:refreshHerdingFootEvent()
+    end
+
+end
+
+
+-- Remove + re-register the HerdingLite foot action event. Used as a recovery step
+-- whenever we detect the player has returned to gameplay from a menu/dialog, because
+-- tab-through-vehicles + teleport can leave the event in a broken display state
+-- (setActionEventActive no longer affects the F1 menu until the event is re-registered).
+function AnimalManager:refreshHerdingFootEvent()
+
+    if g_inputBinding == nil then return end
+    if PlayerInputComponent == nil or InputAction == nil or InputAction.HerdingLite == nil then return end
+
+    -- Precompute the correct display state so we can apply it to the freshly
+    -- registered event right away. If we only register and wait for the 75-tick
+    -- husbandry check, the prompt stays blank until that tick fires.
+    local husbandry = self:getHusbandryInRange()
+    local inRange = husbandry ~= nil
+    local herdingActive = g_localPlayer ~= nil and self.farms[g_localPlayer.farmId] ~= nil
+    local key = herdingActive and "ahl_stopHerding" or "ahl_startHerding"
+    local text = g_i18n:getText(key, modName)
+    local active = inRange or herdingActive
+
+    local oldFootId = self.herdingEventId
+
+    g_inputBinding:beginActionEventsModification(PlayerInputComponent.INPUT_CONTEXT_NAME)
+
+    if oldFootId ~= nil and oldFootId ~= "" then
+        g_inputBinding:removeActionEvent(oldFootId)
+    end
+
+    local _, newEventId = g_inputBinding:registerActionEvent(
+        InputAction.HerdingLite, AnimalManager, AnimalManager.onToggleHerding,
+        false, true, false, true, nil, false
+    )
+
+    g_inputBinding:endActionEventsModification()
+
+    if newEventId == nil or newEventId == "" then return end
+
+    self.herdingEventId = newEventId
+    g_inputBinding:setActionEventTextPriority(newEventId, GS_PRIO_VERY_HIGH)
+    g_inputBinding:setActionEventText(newEventId, text)
+    g_inputBinding:setActionEventActive(newEventId, active)
+    g_inputBinding:setActionEventTextVisibility(newEventId, active)
+
+    -- Also re-sync the in-vehicle event so its prompt matches.
+    if self.herdingVehicleEventId ~= nil then
+        g_inputBinding:setActionEventActive(self.herdingVehicleEventId, active)
+        g_inputBinding:setActionEventTextVisibility(self.herdingVehicleEventId, active)
+        g_inputBinding:setActionEventText(self.herdingVehicleEventId, text)
+    end
+
+    -- Next husbandry check will re-validate and correct anything that changes.
+    self.ticksSinceLastHusbandryCheck = 75
+
+    if self.animDebugEnabled then
+        Logging.info("[AHL] refreshHerdingFootEvent: %s → %s (active=%s)", tostring(oldFootId), tostring(newEventId), tostring(active))
+    end
+
+end
+
+
 function AnimalManager.onToggleHerding()
 
     if g_localPlayer == nil then return end
@@ -1758,6 +2096,266 @@ function AnimalManager.consoleCommandToggleCollisionDebug()
 	g_animalManager.collisionDebugEnabled = not g_animalManager.collisionDebugEnabled
 
 	return string.format("Animal collision debug: %s", g_animalManager.collisionDebugEnabled and "on" or "off")
+
+end
+
+
+function AnimalManager.consoleCommandToggleAnimDebug()
+
+	g_animalManager.animDebugEnabled = not g_animalManager.animDebugEnabled
+	g_animalManager.animDebugTimer = 0
+
+	return string.format("Animal animation debug: %s", g_animalManager.animDebugEnabled and "on" or "off")
+
+end
+
+
+function AnimalManager.consoleCommandRefreshPrompt()
+
+	local self = g_animalManager
+	if g_localPlayer == nil then return "no local player" end
+
+	local husbandry = self:getHusbandryInRange()
+	local inRange = husbandry ~= nil
+	local herdingActive = self.farms[g_localPlayer.farmId] ~= nil
+	local key = herdingActive and "ahl_stopHerding" or "ahl_startHerding"
+	local text = g_i18n:getText(key, modName)
+	local active = inRange or herdingActive
+
+	-- Nuclear approach: fully unregister, then register fresh. Rules out any stale
+	-- internal flags on the existing event.
+	local oldFootId = self.herdingEventId
+	g_inputBinding:beginActionEventsModification(PlayerInputComponent.INPUT_CONTEXT_NAME)
+
+	if oldFootId ~= nil and oldFootId ~= "" then
+		g_inputBinding:removeActionEvent(oldFootId)
+	end
+
+	local _, newEventId = g_inputBinding:registerActionEvent(
+		InputAction.HerdingLite, AnimalManager, AnimalManager.onToggleHerding,
+		false, true, false, true, nil, false
+	)
+	g_inputBinding:endActionEventsModification()
+
+	if newEventId ~= nil and newEventId ~= "" then
+		self.herdingEventId = newEventId
+		g_inputBinding:setActionEventTextPriority(newEventId, GS_PRIO_VERY_HIGH)
+		g_inputBinding:setActionEventText(newEventId, text)
+		g_inputBinding:setActionEventActive(newEventId, active)
+		g_inputBinding:setActionEventTextVisibility(newEventId, active)
+	end
+
+	if self.herdingVehicleEventId ~= nil then
+		g_inputBinding:setActionEventActive(self.herdingVehicleEventId, active)
+		g_inputBinding:setActionEventTextVisibility(self.herdingVehicleEventId, active)
+		g_inputBinding:setActionEventText(self.herdingVehicleEventId, text)
+	end
+
+	return string.format("Refreshed (remove+re-register). active=%s text='%s' husbandryInRange=%s oldFootId=%s newFootId=%s vehId=%s",
+		tostring(active), text, tostring(husbandry), tostring(oldFootId), tostring(self.herdingEventId), tostring(self.herdingVehicleEventId))
+
+end
+
+
+function AnimalManager.consoleCommandDumpInputState()
+
+	local self = g_animalManager
+	local controlledVehicle = g_currentMission and g_currentMission.controlledVehicle
+	local player = g_localPlayer
+
+	print("===== [AHL] Herding input state =====")
+	print(string.format("  g_localPlayer = %s   farmId = %s", tostring(player), tostring(player and player.farmId)))
+	print(string.format("  input context = %s", tostring(g_inputBinding and g_inputBinding:getContextName() or "?")))
+	print(string.format("  controlledVehicle = %s   lastControlledVehicle = %s", tostring(controlledVehicle), tostring(self.lastControlledVehicle)))
+
+	local dogFarm = nil
+	if g_dogHerding ~= nil and player ~= nil then dogFarm = g_dogHerding.farms[player.farmId] end
+	print(string.format("  regularHerding farms[local] = %s", tostring(player and self.farms[player.farmId])))
+	print(string.format("  dogHerding farms[local] = %s   isLocalActive = %s   dogEventId = %s",
+		tostring(dogFarm),
+		tostring(g_dogHerding and g_dogHerding:isLocalActive()),
+		tostring(g_dogHerding and g_dogHerding.dogEventId)))
+	print(string.format("  herdingEventId = %s (foot)", tostring(self.herdingEventId)))
+	print(string.format("  herdingVehicleEventId = %s", tostring(self.herdingVehicleEventId)))
+	print(string.format("  unloadTrailerEventId = %s", tostring(self.unloadTrailerEventId)))
+	print(string.format("  ticksSinceLastHusbandryCheck = %s", tostring(self.ticksSinceLastHusbandryCheck)))
+	print(string.format("  herdingEnabled = %s   farms[localFarm] = %s", tostring(self.herdingEnabled), tostring(player and self.farms[player.farmId])))
+
+	-- Compute husbandry check result
+	if player ~= nil then
+		local husb = self:getHusbandryInRange()
+		print(string.format("  getHusbandryInRange() = %s", tostring(husb)))
+
+		local px, _, pz
+		if controlledVehicle ~= nil then
+			px, _, pz = getWorldTranslation(controlledVehicle.rootNode)
+			print(string.format("  querying from vehicle at (%.2f, %.2f)", px, pz))
+		else
+			px, _, pz = getWorldTranslation(player.rootNode)
+			print(string.format("  querying from player at (%.2f, %.2f)", px, pz))
+		end
+
+		print("  --- owned husbandries ---")
+		for _, placeable in pairs(g_currentMission.husbandrySystem.placeables) do
+			if placeable:getOwnerFarmId() == player.farmId then
+				local hx, _, hz = getWorldTranslation(placeable.rootNode)
+				local dist = MathUtil.vector2Length(hx - px, hz - pz)
+				local inArea = placeable:getIsInAnimalDeliveryArea(px, pz)
+				print(string.format("    husbandry=%s type=%s dist=%.2f inDeliveryArea=%s",
+					tostring(placeable:getUniqueId()), tostring(placeable:getAnimalTypeIndex()), dist, tostring(inArea)))
+			end
+		end
+	end
+
+	return "Dumped herding input state."
+
+end
+
+
+function AnimalManager.consoleCommandDumpAnimCache()
+
+	local animalSystem = g_currentMission and g_currentMission.animalSystem
+	local seen = {}
+	local count = 0
+
+	for _, farm in pairs(g_animalManager.farms) do
+
+		for _, animal in pairs(farm.animals) do
+
+			count = count + 1
+
+			local typeName = "?"
+			if animalSystem ~= nil and animal.animalTypeIndex ~= nil then
+				local at = animalSystem:getTypeByIndex(animal.animalTypeIndex)
+				if at ~= nil and at.name ~= nil then typeName = at.name end
+			end
+
+			local age = (animal.cluster ~= nil and animal.cluster.age) or -1
+			local key = string.format("%s|%s", typeName, tostring(animal.visualAnimalIndex))
+			if seen[key] then continue end
+			seen[key] = true
+
+			print(string.format("===== [AHL] Animation cache for %s (visualIdx=%s, age=%s) =====", typeName, tostring(animal.visualAnimalIndex), tostring(age)))
+
+			if animal.animation == nil or animal.animation.cache == nil then
+				print("  (no cache)")
+				continue
+			end
+
+			local states = animal.animation.cache.states or {}
+			for stateId, state in pairs(states) do
+				print(string.format("  state '%s':", stateId))
+				for animId, entry in pairs(state) do
+					local cl = entry.clip and entry.clip.name or "-"
+					local cL = entry.clipLeft and entry.clipLeft.name or "-"
+					local cR = entry.clipRight and entry.clipRight.name or "-"
+					print(string.format("    id=%-12s clip=%-22s clipLeft=%-22s clipRight=%-22s speed=%.3f",
+						animId, cl, cL, cR, entry.speed or -1))
+				end
+			end
+
+		end
+
+	end
+
+	return string.format("Dumped animation cache for %d herded animal(s).", count)
+
+end
+
+
+function AnimalManager:logAnimDebug()
+
+	local animalSystem = g_currentMission and g_currentMission.animalSystem
+	local totalAnimals = 0
+
+	for farmId, farm in pairs(self.farms) do
+
+		for _, animal in pairs(farm.animals) do
+
+			totalAnimals = totalAnimals + 1
+
+			local typeName = "?"
+			if animalSystem ~= nil and animal.animalTypeIndex ~= nil then
+				local animalType = animalSystem:getTypeByIndex(animal.animalTypeIndex)
+				if animalType ~= nil and animalType.name ~= nil then typeName = animalType.name end
+			end
+
+			local age = (animal.cluster ~= nil and animal.cluster.age) or -1
+
+			local clips = {}
+			if animal.animation ~= nil and animal.animation.tracks ~= nil then
+				for _, track in pairs(animal.animation.tracks) do
+					if track.enabled and track.clip ~= nil and track.clip.name ~= nil then
+						table.insert(clips, string.format("%s(%s b=%.2f)", track.id or "?", track.clip.name, track.blend or 0))
+					end
+				end
+			end
+
+			local clipStr = #clips > 0 and table.concat(clips, ", ") or "none"
+
+			local transitionStr = "none"
+			if animal.animation ~= nil and animal.animation.transition ~= nil then
+				local t = animal.animation.transition
+				local fromIds, toIds = {}, {}
+				for _, tr in pairs(t.from or {}) do table.insert(fromIds, tr.id or "?") end
+				for _, tr in pairs(t.to or {}) do table.insert(toIds, tr.id or "?") end
+				transitionStr = string.format("%s -> %s", table.concat(fromIds, "+"), table.concat(toIds, "+"))
+			end
+
+			local movementSpeed = animal.animation ~= nil and animal.animation:getMovementSpeed() or 0
+			local animSpeed = animal.speed or 0
+
+			local names = animal.animNames or {}
+
+			local walkMod, runMod, idleMod = 0, 0, 0
+			if animal.animation ~= nil and animal.animation.speedModifiers ~= nil then
+				walkMod = animal.animation.speedModifiers["walk"] or 1
+				runMod  = animal.animation.speedModifiers["run"]  or 1
+				idleMod = animal.animation.speedModifiers["idle"] or 1
+			end
+
+			-- Show what's actually resolved from the cache for each configured ID
+			local function resolved(stateId, wantedId)
+				if animal.animation == nil or animal.animation.cache == nil then return "nocache" end
+				local state = animal.animation.cache.states[stateId]
+				if state == nil then return "no-state" end
+				local entry = state[wantedId]
+				if entry == nil then return string.format("%s:MISSING", wantedId) end
+				local cl = entry.clip and entry.clip.name or "-"
+				local cL = entry.clipLeft and entry.clipLeft.name or "-"
+				local cR = entry.clipRight and entry.clipRight.name or "-"
+				return string.format("%s->(clip=%s L=%s R=%s spd=%.2f)", wantedId, cl, cL, cR, entry.speed or -1)
+			end
+
+			local liveSpeedScale0, liveSpeedScale1 = "-", "-"
+			if animal.animation ~= nil and animal.animation.animationSet ~= nil then
+				local ok0, s0 = pcall(getAnimTrackSpeedScale, animal.animation.animationSet, 0)
+				local ok1, s1 = pcall(getAnimTrackSpeedScale, animal.animation.animationSet, 1)
+				if ok0 then liveSpeedScale0 = string.format("%.3f", s0 or 0) end
+				if ok1 then liveSpeedScale1 = string.format("%.3f", s1 or 0) end
+			end
+
+			print(string.format("[AHL anim] farm=%s id=%s type=%s age=%s | clips=[%s] transition=%s | speed=%.3f movSpeed=%.3f | mods walk=%.3f run=%.3f idle=%.3f | trackScale 0=%s 1=%s | cache: %s / %s / %s",
+				tostring(farmId),
+				tostring(animal.id),
+				typeName,
+				tostring(age),
+				clipStr,
+				transitionStr,
+				animSpeed,
+				movementSpeed,
+				walkMod, runMod, idleMod,
+				liveSpeedScale0, liveSpeedScale1,
+				resolved("walk", names.walk or "walk1"),
+				resolved("idle", names.idle or "idle1"),
+				resolved("run", names.run or "run1")
+			))
+
+		end
+
+	end
+
+	if totalAnimals == 0 then print("[AHL anim] no herded animals") end
 
 end
 

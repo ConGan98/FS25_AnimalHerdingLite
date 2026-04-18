@@ -16,7 +16,13 @@
 		<text name="ahl_notInHusbandry" text="Vous devez être à l'intérieur d'un élevage pour commencer à rassembler."/>
 		<text name="ahl_unloadTrailer" text="Décharger la remorque"/>
 		<text name="ahl_trailerTypeMismatch" text="Les animaux dans la remorque ne correspondent pas à cet élevage"/>
+		<text name="ahl_sendDog" text="Envoyer le chien"/>
+		<text name="ahl_recallDog" text="Rappeler le chien"/>
+		<text name="ahl_noDog" text="Vous n'avez pas de chien. Achetez-en un dans le magasin."/>
+		<text name="ahl_startDogHerding" text="Démarrer le chien de berger"/>
+		<text name="ahl_stopDogHerding" text="Arrêter le chien de berger"/>
 		<text name="input_HerdingLite" text=""/>
 		<text name="input_HerdingLiteUnload" text="Décharger la remorque dans l'élevage"/>
+		<text name="input_HerdingLiteDog" text="Activer/Désactiver le chien de berger"/>
 	</texts>
 </l10n>

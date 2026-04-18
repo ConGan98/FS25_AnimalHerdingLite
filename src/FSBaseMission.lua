@@ -7,6 +7,9 @@ FSBaseMission.onStartMission = Utils.prependedFunction(FSBaseMission.onStartMiss
 	self:addUpdateable(g_animalManager)
 	self:addDrawable(g_animalManager)
 
+	g_dogHerding = DogHerding.new()
+	self:addUpdateable(g_dogHerding)
+
 end)
 
 

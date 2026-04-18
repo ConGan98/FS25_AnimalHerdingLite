@@ -80,14 +80,21 @@ function AnimalCollisionController:load(rootNode, animalTypeIndex, age)
 
 	local node = g_animalManager:getCollisionController(animalTypeIndex)
 	link(rootNode, node)
-	
-    -- young animals should have smaller navMeshAgent attributes. default attributes are intended for adults
-	if age < (AnimalManager.ANIMAL_TYPE_INDEX_TO_AGE_OFFSET[animalTypeIndex] or 12) then
+
+	-- young animals should have smaller navMeshAgent attributes. default attributes are intended for adults
+	local isYoung = age < (AnimalManager.ANIMAL_TYPE_INDEX_TO_AGE_OFFSET[animalTypeIndex] or 12)
+	if isYoung then
 		self.height, self.radius = self.height * 0.5, self.radius * 0.75
 		setScale(node, self.radius, self.height, self.radius)
 	end
 
 	setTranslation(node, 0, self.height / 2 + 0.15, self.radius * 1.5)
+
+	-- Behavior radius: separation / yield code uses this (species-tuned), independent
+	-- of the physics probe geometry above which stays driven by engine navMeshAgent.
+	local cfg = AnimalSpeciesConfig ~= nil and AnimalSpeciesConfig.get(animalTypeIndex) or nil
+	self.behaviorRadius = (cfg and cfg.radius) or self.radius
+	if isYoung then self.behaviorRadius = self.behaviorRadius * 0.75 end
 	
 	self.frontCollision = getChild(node, "frontCollision")
 	self.leftCollision = getChild(node, "leftCollision")
@@ -139,7 +146,10 @@ end
 
 function AnimalCollisionController:onOverlapLeftConvexCallback(node)
 
-	if node ~= self.proxy then
+	if node ~= self.proxy and g_animalManager.collisionNodes[node] == nil then
+
+		local name = getName(node)
+		if name ~= nil and string.find(string.lower(name), "trigger") then return end
 
 		self.hasLeftCollision = true
 
@@ -157,7 +167,10 @@ end
 
 function AnimalCollisionController:onOverlapRightConvexCallback(node)
 
-	if node ~= self.proxy then
+	if node ~= self.proxy and g_animalManager.collisionNodes[node] == nil then
+
+		local name = getName(node)
+		if name ~= nil and string.find(string.lower(name), "trigger") then return end
 
 		self.hasRightCollision = true
 
