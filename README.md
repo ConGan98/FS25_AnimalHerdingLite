@@ -33,7 +33,7 @@ This mod **requires** [RealisticLivestock (RLRM)](https://github.com/rittermod/F
 - **Automatic husbandry entry** -- herded animals are automatically moved into a compatible husbandry when they walk inside it (except their original pen, which becomes available after they leave for a period)
 - **Map hotspots** -- herded animals appear on the minimap for easy tracking
 
-### Dog Herding Experimental only 50% working
+### Dog Herding Experimental
 - **Use your companion dog to gather and drive** -- stand inside a cow or sheep husbandry with a doghouse nearby and press `Left Shift + B` to toggle dog herding
 - **GATHER / DRIVE behavior** -- when animals are scattered the dog runs out to the furthest outlier and pushes it back toward the herd; once the herd is tight the dog parks behind it opposite you, so the group flees toward your position
 - **Passenger mode** -- if your dog is following you and you enter a vehicle that has a `passengerSeat##PlayerSkin` node, the dog rides along seated in the passenger seat (sit animation loop); it resumes following when you exit. Vehicles without a passenger seat node fall through to the default behaviour where the dog returns to its doghouse
