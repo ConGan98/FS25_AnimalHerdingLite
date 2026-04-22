@@ -21,7 +21,7 @@
 		<text name="ahl_noDog" text="Sie haben keinen Hund. Kaufen Sie einen im Laden."/>
 		<text name="ahl_startDogHerding" text="Hütehund starten"/>
 		<text name="ahl_stopDogHerding" text="Hütehund stoppen"/>
-		<text name="input_HerdingLite" text=""/>
+		<text name="input_HerdingLite" text="Call Dog"/>
 		<text name="input_HerdingLiteUnload" text="Anhänger in Stall entladen"/>
 		<text name="input_HerdingLiteDog" text="Hund zum Hüten umschalten"/>
 	</texts>

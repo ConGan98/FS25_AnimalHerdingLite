@@ -46,6 +46,7 @@ function AnimalManager.new()
 	addConsoleCommand("toggleAnimalDebug", "Toggle animal debug mode", "consoleCommandToggleDebug", AnimalManager)
 	addConsoleCommand("toggleAnimalCollisionDebug", "Toggle animal collision type debug overlay", "consoleCommandToggleCollisionDebug", AnimalManager)
 	addConsoleCommand("toggleAnimalAnimDebug", "Toggle logging of each herded animal's current animation clip and speed", "consoleCommandToggleAnimDebug", AnimalManager)
+	addConsoleCommand("toggleAnimalMovementDebug", "Toggle 3D overlay showing per-animal state/speed/flip-rate for diagnosing animation flicker + movement mismatch", "consoleCommandToggleMovementDebug", AnimalManager)
 	addConsoleCommand("dumpAnimalAnimCache", "Dump all animation IDs/clips available per herded animal", "consoleCommandDumpAnimCache", AnimalManager)
 	addConsoleCommand("dumpHerdingInputState", "Dump herding input event state and husbandry range result", "consoleCommandDumpInputState", AnimalManager)
 	addConsoleCommand("refreshHerdingPrompt", "Force-refresh the herding action-event state now", "consoleCommandRefreshPrompt", AnimalManager)
@@ -222,6 +223,53 @@ function AnimalManager:update(dT)
         local farmTrailers
         local players = farm.players
 
+        -- Flag per-animal when dog herding is active on its farm. Disables
+        -- grazing (which would otherwise pull calm animals back to the feed
+        -- area when the dog is out of range).
+        local dogHerdingActive = g_dogHerding ~= nil and g_dogHerding:isActive(farmId)
+
+        -- While dog herding, compute the herd centroid once so each animal
+        -- can receive a per-animal synthetic "guide threat" positioned on
+        -- the animal's far-side from centroid. Animals flee away from that
+        -- synthetic threat, which is mathematically equivalent to walking
+        -- toward the centroid — and because the synthetic sits inside every
+        -- species' turnDistance (5 m), the normal turn gate in HerdableAnimal
+        -- engages and the animal actually rotates to face the centroid
+        -- instead of just fleeing in whatever direction it was already
+        -- facing (which is what happens when only the real dog is
+        -- influencing the animal from well outside turnDistance).
+        local GUIDE_SYNTHETIC_DIST = 5
+        -- Skip the guide entirely during HOLD so animals calm down rather
+        -- than continuing to creep toward the centroid with the dog paused.
+        local dogGuideActive = dogHerdingActive and not g_dogHerding:isHolding(farmId)
+        -- Guide target depends on FSM mode:
+        --   GATHER  → centroid of the herd (consolidate scattered animals)
+        --   DRIVE   → player position (rotate the tight herd to face the
+        --             handler and walk toward them)
+        --   other   → centroid (safe default)
+        local guideTargetX, guideTargetZ
+        if dogGuideActive then
+            local mode = g_dogHerding:getMode(farmId)
+            if mode == "DRIVE" then
+                for _, pl in pairs(g_currentMission.playerSystem.players) do
+                    if pl.farmId == farmId and pl.rootNode ~= nil and pl.rootNode ~= 0 then
+                        local px, _, pz = getWorldTranslation(pl.rootNode)
+                        guideTargetX, guideTargetZ = px, pz
+                        break
+                    end
+                end
+            end
+            if guideTargetX == nil and #farm.animals > 0 then
+                local cxs, czs = 0, 0
+                for _, a in ipairs(farm.animals) do
+                    cxs = cxs + a.position.x
+                    czs = czs + a.position.z
+                end
+                guideTargetX = cxs / #farm.animals
+                guideTargetZ = czs / #farm.animals
+            end
+        end
+
         -- Per-farm spatial hash for flocking neighbor queries
         local animalGrid = {}
         for _, a in ipairs(farm.animals) do
@@ -310,13 +358,38 @@ function AnimalManager:update(dT)
                 -- Stash for animal:update() so its front-neighbor yield can reuse
                 -- the same list without a second spatial-hash query.
                 animal._frameNeighbors = neighbors
+                animal.dogHerdingActive = dogHerdingActive
 
-                -- Dog herding is wired in entirely through the influence list
-                -- (see AnimalManager:updatePlayerPositions -> g_dogHerding:getInfluencers).
-                -- No per-animal overrides: the arousal / nearest-threat / vehicle-
-                -- multiplier pipeline that handles regular herding produces the
-                -- correct behavior for dog herding too.
-                animal:updateRelativeToPlayers(players, updateRelativeToPlayers, dtSec, neighbors)
+                -- Per-animal influencer list. During dog herding we inject a
+                -- synthetic "guide threat" positioned 5 m behind the animal
+                -- relative to the centroid so the animal's flee direction
+                -- becomes unit(centroid - animal) — i.e. toward the centroid.
+                -- At 5 m it sits inside every species' turnDistance so the
+                -- animal actually rotates to face the centroid. The real dog
+                -- still appears in the shared `players` list (via
+                -- g_dogHerding:getInfluencers) and contributes to arousal
+                -- buildup; the synthetic just overrides the direction.
+                local animalPlayers = players
+                if dogGuideActive and guideTargetX ~= nil then
+                    local ax, az = animal.position.x, animal.position.z
+                    local gdx, gdz = ax - guideTargetX, az - guideTargetZ
+                    local gdl = math.sqrt(gdx * gdx + gdz * gdz)
+                    if gdl > 0.3 then
+                        local gux, guz = gdx / gdl, gdz / gdl
+                        local gtx = ax + gux * GUIDE_SYNTHETIC_DIST
+                        local gtz = az + guz * GUIDE_SYNTHETIC_DIST
+                        animalPlayers = {}
+                        for _, p in ipairs(players) do animalPlayers[#animalPlayers + 1] = p end
+                        -- { x, z, isBucket, isVehicle, isGuide } — the
+                        -- isGuide flag tells HerdableAnimal's sense stage
+                        -- to use this influencer for flee DIRECTION only;
+                        -- it does not build arousal, so animals near the
+                        -- synthetic aren't permanently panicked.
+                        animalPlayers[#animalPlayers + 1] = { gtx, gtz, false, false, true }
+                    end
+                end
+
+                animal:updateRelativeToPlayers(animalPlayers, updateRelativeToPlayers, dtSec, neighbors)
                 animal:update(dT)
             end
 
@@ -382,6 +455,10 @@ function AnimalManager:update(dT)
 
         end
 
+    end
+
+    if self.movementDebugEnabled then
+        self:drawMovementDebugOverlay(dT)
     end
 
     if self.isServer then
@@ -1248,7 +1325,12 @@ function AnimalManager:loadAnimations(filename, animationSet, useSkeleton)
             local animation = {
                 ["id"] = xmlFile:getString(animKey .. "#id"),
                 ["transitions"] = {},
-                ["speed"] = xmlFile:getFloat(animKey .. "#speed", 1.0)
+                ["speed"] = xmlFile:getFloat(animKey .. "#speed", 1.0),
+                -- rotation: degrees covered per animation cycle (0 = no yaw).
+                -- distance: metres translated per cycle (0 = pure in-place pose).
+                -- Both are used by the turn-clip bucket picker in AnimalAnimation.
+                ["rotation"] = xmlFile:getFloat(animKey .. "#rotation", 0),
+                ["distance"] = xmlFile:getFloat(animKey .. "#distance", 0)
             }
             
             for _, clipType in pairs(clipTypes) do
@@ -1281,6 +1363,28 @@ function AnimalManager:loadAnimations(filename, animationSet, useSkeleton)
         cache.states[stateId] = animations
 
     end)
+
+    -- Build per-side turn buckets sorted ascending by rotation so the runtime
+    -- can pick the smallest clip that covers the remaining angle. Every
+    -- quadruped species in the engine XMLs provides turnLeft/turnRight states
+    -- with 45/90/135/180° sub-clips (horse reuses one clip with speed
+    -- multipliers for the larger buckets — handled at playback time via
+    -- setAnimTrackSpeedScale, not here). hasTurnStates is a fast fallback
+    -- flag for species that don't (baby sheep, dogs).
+    cache.turnBuckets = { ["left"] = {}, ["right"] = {} }
+    local function collectBuckets(stateId, side)
+        local state = cache.states[stateId]
+        if state == nil then return end
+        for _, anim in pairs(state) do
+            if (anim.clip ~= nil or anim.clipLeft ~= nil) and (anim.rotation or 0) > 0 then
+                table.insert(cache.turnBuckets[side], { rotation = anim.rotation, anim = anim })
+            end
+        end
+        table.sort(cache.turnBuckets[side], function(a, b) return a.rotation < b.rotation end)
+    end
+    collectBuckets("turnLeft", "left")
+    collectBuckets("turnRight", "right")
+    cache.hasTurnStates = #cache.turnBuckets.left > 0 and #cache.turnBuckets.right > 0
 
     local defaultBlendTime = xmlFile:getInt("animation.transitions#defaultBlendTime", 750)
 
@@ -2106,6 +2210,151 @@ function AnimalManager.consoleCommandToggleAnimDebug()
 	g_animalManager.animDebugTimer = 0
 
 	return string.format("Animal animation debug: %s", g_animalManager.animDebugEnabled and "on" or "off")
+
+end
+
+
+-- Visual debug overlay for animation + movement diagnostics. Toggled via
+-- the `toggleAnimalMovementDebug` console command. Draws 3D text above each
+-- herded animal with the signals most relevant to flicker / speed-mismatch
+-- issues:
+--   state      I / W / R         current primary state flag
+--   turn       T→XX°              state.isTurning + remaining angle to target
+--   clip       <id>               current anim clip id on track 0
+--   speed      cur / tgt          self.speed vs animation:getMovementSpeed()
+--   scale      move × play        lastMoveSpeedScale × playback ratio
+--   flips/s    #                  state transitions per second (walk↔idle etc)
+--   installs/s #                  anim track (re)installs per second
+--   graze      ON / off           grazing mode + distance to current graze target
+function AnimalManager.consoleCommandToggleMovementDebug()
+
+	g_animalManager.movementDebugEnabled = not g_animalManager.movementDebugEnabled
+	return string.format("Animal movement debug: %s", g_animalManager.movementDebugEnabled and "on" or "off")
+
+end
+
+
+-- Called each tick from AnimalManager:update while movementDebugEnabled.
+-- Iterates every herded animal on every farm and renders its state panel.
+function AnimalManager:drawMovementDebugOverlay(dT)
+
+	local g_time_now = g_time or 0
+
+	for _, farm in pairs(self.farms) do
+		for _, animal in pairs(farm.animals or {}) do
+			self:drawMovementDebugForAnimal(animal, dT, g_time_now)
+		end
+	end
+
+end
+
+
+function AnimalManager:drawMovementDebugForAnimal(animal, dT, now)
+
+	if animal == nil or animal.position == nil then return end
+	local state = animal.state
+	if state == nil then return end
+
+	-- Track state changes for flip rate.
+	local primary
+	if state.isIdle then primary = "I"
+	elseif state.isWalking then primary = "W"
+	elseif state.isRunning then primary = "R"
+	else primary = "?" end
+
+	animal._mdbgFlips = animal._mdbgFlips or {}
+	if animal._mdbgLastState ~= primary then
+		table.insert(animal._mdbgFlips, now)
+		animal._mdbgLastState = primary
+	end
+	-- Trim flips outside the 2 s window.
+	while #animal._mdbgFlips > 0 and now - animal._mdbgFlips[1] > 2000 do
+		table.remove(animal._mdbgFlips, 1)
+	end
+	local flipRate = #animal._mdbgFlips / 2
+
+	-- Clip install rate (tracked on AnimalAnimation._mdbgInstallTimes).
+	local installRate = 0
+	if animal.animation ~= nil and animal.animation._mdbgInstallTimes ~= nil then
+		local times = animal.animation._mdbgInstallTimes
+		while #times > 0 and now - times[1] > 2000 do table.remove(times, 1) end
+		installRate = #times / 2
+	end
+
+	-- Current primary clip on track 0 (or first enabled track).
+	local clipName = "-"
+	local trackSpeed = 0
+	if animal.animation ~= nil and animal.animation.tracks ~= nil then
+		for _, t in pairs(animal.animation.tracks) do
+			if t.enabled then
+				if t.clip ~= nil and t.clip.name ~= nil then
+					clipName = t.clip.name
+				end
+				trackSpeed = t.speed or 0
+				break
+			end
+		end
+	end
+
+	-- Remaining turn angle.
+	local turnStr = "-"
+	if state.isTurning then
+		local remaining = (state.targetDirY or 0) - (animal.rotation and animal.rotation.y or 0)
+		while remaining > math.pi do remaining = remaining - 2 * math.pi end
+		while remaining <= -math.pi do remaining = remaining + 2 * math.pi end
+		turnStr = string.format("T %+4.0f°", math.deg(remaining))
+	end
+
+	-- Speeds.
+	local curSpeed = animal.speed or 0
+	local tgtSpeed = 0
+	if animal.animation ~= nil and animal.animation.getMovementSpeed ~= nil then
+		tgtSpeed = animal.animation:getMovementSpeed() or 0
+	end
+
+	local moveScale = animal.lastMoveSpeedScale or 1
+	local playScale = (animal.animation and animal.animation._lastPlaybackScale) or 1
+
+	-- Grazing info.
+	local grazeStr = "-"
+	if animal.isGrazing then
+		if animal.grazeTarget ~= nil then
+			local gdx = animal.grazeTarget.x - animal.position.x
+			local gdz = animal.grazeTarget.z - animal.position.z
+			local gdist = math.sqrt(gdx * gdx + gdz * gdz)
+			grazeStr = string.format("GRAZE %.1fm", gdist)
+		else
+			grazeStr = "GRAZE (idle)"
+		end
+	end
+
+	-- Compose lines.
+	local lines = {
+		string.format("%s  %s", primary, turnStr),
+		string.format("clip %s (s=%.2f)", clipName, trackSpeed),
+		string.format("v %.2f/%.2f m/s  scale %.2fx%.2f", curSpeed, tgtSpeed, moveScale, playScale),
+		string.format("flips %.1f/s  installs %.1f/s", flipRate, installRate),
+		grazeStr
+	}
+
+	-- Colour by flicker severity. Thresholds reflect what a healthy animal
+	-- can hit from natural behaviour (e.g. a short graze cycle is ~3
+	-- installs in 2 s = 1.5/s). Green = healthy, yellow = busy but
+	-- plausible (graze cycles, transitions), red = real flicker loop.
+	local r, g, b = 0.6, 1.0, 0.6
+	if installRate > 2.5 then r, g, b = 1.0, 0.4, 0.4
+	elseif installRate > 1.5 or flipRate > 2.5 then r, g, b = 1.0, 1.0, 0.4 end
+
+	local x, y, z = animal.position.x, animal.position.y, animal.position.z
+	setTextColor(r, g, b, 1)
+	setTextAlignment(RenderText.ALIGN_CENTER)
+	local size = 0.17
+	local yBase = y + 2.2
+	for i, line in ipairs(lines) do
+		renderText3D(x, yBase - (i - 1) * (size * 1.2), z, 0, 0, 0, size, line)
+	end
+	setTextAlignment(RenderText.ALIGN_LEFT)
+	setTextColor(1, 1, 1, 1)
 
 end
 

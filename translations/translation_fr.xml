@@ -21,7 +21,7 @@
 		<text name="ahl_noDog" text="Vous n'avez pas de chien. Achetez-en un dans le magasin."/>
 		<text name="ahl_startDogHerding" text="Démarrer le chien de berger"/>
 		<text name="ahl_stopDogHerding" text="Arrêter le chien de berger"/>
-		<text name="input_HerdingLite" text=""/>
+		<text name="input_HerdingLite" text="Call Dog"/>
 		<text name="input_HerdingLiteUnload" text="Décharger la remorque dans l'élevage"/>
 		<text name="input_HerdingLiteDog" text="Activer/Désactiver le chien de berger"/>
 	</texts>

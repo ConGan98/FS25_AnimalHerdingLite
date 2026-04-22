@@ -62,6 +62,19 @@ AnimalSpeciesConfig = {}
 --   height            (m)   Behavior height (currently informational).
 --   separationWeight        Strength of the repulsion-from-neighbors boids
 --                           force. Higher = animals keep more personal space.
+--
+-- -- LOCOMOTION / ANIMATION --------------------------------------------------
+--   turnInPlaceMinDeg       Above this remaining angle (degrees) the animal
+--                           freezes translation and plays the dedicated
+--                           in-place turn clip (turnLeft/turnRight from
+--                           engine XML). Shallower heading changes keep
+--                           walking with the subtle left/right walk-variant
+--                           bias. Smaller values = more visible turn anim.
+--   speedAccelMps2    (m/s²) Rate-of-change clamp on world translation speed.
+--                           Removes the walk↔run lurch at the moment the
+--                           animation transition completes and speedId flips.
+--                           Does not affect animation playback rate — the
+--                           animation engine's own clip-blend handles visuals.
 -- ============================================================================
 
 
@@ -88,9 +101,15 @@ local BY_NAME = {
 		vehicleArousalMult  = 1.5,
 		grazeReselectMs     = { 6000, 14000 },
 		grazeChancePerTick  = 0.015,
-		radius              = 0.6,
+		-- radius governs the behaviour-side spacing (separation boid range,
+		-- front-neighbor yield cone, pairwise geometric push in AnimalManager).
+		-- Cows standing shoulder-to-shoulder are ~0.4 m half-width, so 0.45
+		-- keeps them close while still preventing visible mesh overlap.
+		radius              = 0.45,
 		height              = 1.4,
-		separationWeight    = 1.0,
+		separationWeight    = 0.5,
+		turnInPlaceMinDeg   = 30,
+		speedAccelMps2      = 2.0,
 	},
 	SHEEP = {
 		walkDistance        = 14,
@@ -115,6 +134,8 @@ local BY_NAME = {
 		radius              = 0.4,
 		height              = 0.9,
 		separationWeight    = 1.2,
+		turnInPlaceMinDeg   = 30,
+		speedAccelMps2      = 2.5,
 	},
 	PIG = {
 		walkDistance        = 12,
@@ -139,6 +160,8 @@ local BY_NAME = {
 		radius              = 0.5,
 		height              = 0.8,
 		separationWeight    = 1.0,
+		turnInPlaceMinDeg   = 30,
+		speedAccelMps2      = 2.5,
 	},
 	HORSE = {
 		walkDistance        = 20,
@@ -163,6 +186,8 @@ local BY_NAME = {
 		radius              = 0.8,
 		height              = 1.8,
 		separationWeight    = 0.9,
+		turnInPlaceMinDeg   = 30,
+		speedAccelMps2      = 2.0,
 	},
 	CHICKEN = {
 		walkDistance        = 10,
@@ -187,6 +212,8 @@ local BY_NAME = {
 		radius              = 0.25,
 		height              = 0.5,
 		separationWeight    = 1.4,
+		turnInPlaceMinDeg   = 20,
+		speedAccelMps2      = 3.5,
 	},
 }
 

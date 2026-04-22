@@ -218,7 +218,12 @@ function AnimalSystem:loadAnimations(xmlFile, animationSet)
         
             local animation = {
                 ["id"] = xmlFile:getString(animKey .. "#id"),
-                ["transitions"] = {}
+                ["transitions"] = {},
+                ["speed"] = xmlFile:getFloat(animKey .. "#speed", 1.0),
+                -- rotation: degrees covered per animation cycle (0 = no yaw).
+                -- distance: metres translated per cycle (0 = pure in-place pose).
+                ["rotation"] = xmlFile:getFloat(animKey .. "#rotation", 0),
+                ["distance"] = xmlFile:getFloat(animKey .. "#distance", 0)
             }
             
             for _, clipType in pairs(clipTypes) do
@@ -261,6 +266,24 @@ function AnimalSystem:loadAnimations(xmlFile, animationSet)
         cache.states[stateId] = animations
 
     end)
+
+    -- Build per-side turn buckets sorted ascending by rotation so the runtime
+    -- can pick the smallest clip that covers the remaining angle. hasTurnStates
+    -- is a fast fallback flag for species without turn states (baby sheep, dogs).
+    cache.turnBuckets = { ["left"] = {}, ["right"] = {} }
+    local function collectBuckets(stateId, side)
+        local state = cache.states[stateId]
+        if state == nil then return end
+        for _, anim in pairs(state) do
+            if (anim.clip ~= nil or anim.clipLeft ~= nil) and (anim.rotation or 0) > 0 then
+                table.insert(cache.turnBuckets[side], { rotation = anim.rotation, anim = anim })
+            end
+        end
+        table.sort(cache.turnBuckets[side], function(a, b) return a.rotation < b.rotation end)
+    end
+    collectBuckets("turnLeft", "left")
+    collectBuckets("turnRight", "right")
+    cache.hasTurnStates = #cache.turnBuckets.left > 0 and #cache.turnBuckets.right > 0
 
     local defaultBlendTime = xmlFile:getInt("animation.transitions#defaultBlendTime", 750)
 
