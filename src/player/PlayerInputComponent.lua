@@ -2,6 +2,27 @@ local modName = g_currentModName
 
 local MAX_PICKUP_AGE = 3
 
+-- Forward declaration so the appended registerGlobalPlayerActionEvents below
+-- can reference it as an upvalue. The actual definition is at the bottom of
+-- this file (uses g_animalManager which doesn't exist at file-load time).
+local onAHLPickupAction
+
+
+-- Activate our AHLPickup prompt with the given i18n text and stash this input
+-- component as the one whose animalPickup state the AHLPickup callback should
+-- read. Replaces the old setActionEventText/Active(self.enterActionId, ...)
+-- pattern that depended on the engine routing E to onInputEnter — that route
+-- doesn't fire on some setups (RLRM 1.2.2.0 + Witcombe).
+local function activatePickupPrompt(self, textKey)
+    if g_animalManager.pickupEventId == nil then return end
+    local id = g_animalManager.pickupEventId
+    g_inputBinding:setActionEventText(id, g_i18n:getText(textKey))
+    g_inputBinding:setActionEventTextPriority(id, GS_PRIO_VERY_HIGH)
+    g_inputBinding:setActionEventActive(id, true)
+    g_inputBinding:setActionEventTextVisibility(id, true)
+    g_animalManager.activePickupInputComponent = self
+end
+
 
 -- Returns a rejection reason key if the animal cannot be picked up, or nil if it can.
 local function getPickupRejectionReason(cluster)
@@ -48,6 +69,34 @@ PlayerInputComponent.registerGlobalPlayerActionEvents = Utils.appendedFunction(P
     end
     g_inputBinding:setActionEventActive(g_animalManager.unloadTrailerEventId, false)
 
+    -- Register our own E binding for pickup/return. The mod historically piggy-
+    -- backed on the engine's INTERACT (self.enterActionId) and assumed
+    -- onInputEnter would fire on E press, but on some setups (RLRM 1.2.2.0 +
+    -- Witcombe) the engine no longer routes E to onInputEnter, leaving the
+    -- pickup prompt visible but unresponsive. Owning our own action event
+    -- guarantees E reaches our callback regardless of what the engine does
+    -- with INTERACT.
+    -- Pass AnimalManager as listener so the eventId follows the same
+    -- "<action>|<listener>|<idx>" naming as other AHL events. With nil
+    -- listener some FS25 systems (HUD prompt rendering on certain map mods)
+    -- silently drop the prompt despite the action being active. The
+    -- callback is still a local function; AnimalManager is just bound as
+    -- `self` and our function ignores all args.
+    local _, pickupEventId = g_inputBinding:registerActionEvent(InputAction.AHLPickup, AnimalManager, onAHLPickupAction, false, true, false, true, nil, false)
+    if pickupEventId ~= nil then
+        g_animalManager.pickupEventId = pickupEventId
+        g_inputBinding:setActionEventTextPriority(pickupEventId, GS_PRIO_VERY_HIGH)
+        g_inputBinding:setActionEventActive(pickupEventId, false)
+        g_inputBinding:setActionEventTextVisibility(pickupEventId, false)
+    else
+        Logging.warning("[AHL] AHLPickup registration failed — pickup will not work")
+    end
+
+    -- Stash the local callback on the singleton so refreshHerdingFootEvent in
+    -- AnimalManager.lua can re-register the pickup event after vehicle-teleport
+    -- context churn. The local can't be reached from another file otherwise.
+    g_animalManager._onAHLPickupAction = onAHLPickupAction
+
     if g_dogHerding ~= nil then
         local _, dogEventId = g_inputBinding:registerActionEvent(InputAction.HerdingLiteDog, DogHerding, DogHerding.onToggleDogHerding, false, true, false, true, nil, false)
         g_dogHerding.dogEventId = dogEventId
@@ -63,6 +112,17 @@ end)
 PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update, function(self)
 
     self.animalPickup = nil
+
+    -- Default our pickup prompt to off; any branch that wants the prompt has to
+    -- explicitly turn it back on this tick. Keeps the prompt from sticking after
+    -- the player walks away from a candidate animal.
+    if g_animalManager.pickupEventId ~= nil then
+        g_inputBinding:setActionEventActive(g_animalManager.pickupEventId, false)
+        g_inputBinding:setActionEventTextVisibility(g_animalManager.pickupEventId, false)
+    end
+    if g_animalManager.activePickupInputComponent == self then
+        g_animalManager.activePickupInputComponent = nil
+    end
 
     -- Only process on the owning player, in normal on-foot mode, server-only (SP or MP host without active clients)
     if not self.player.isOwner
@@ -112,8 +172,7 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
         end
 
         self.animalPickup = { ["return"] = true }
-        g_inputBinding:setActionEventText(self.enterActionId, g_i18n:getText("ahl_returnAnimal"))
-        g_inputBinding:setActionEventActive(self.enterActionId, true)
+        activatePickupPrompt(self, "ahl_returnAnimal")
         return
     end
 
@@ -163,8 +222,7 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
                 ["node"] = bestAnimal.collisionController.proxy
             }
 
-            g_inputBinding:setActionEventText(self.enterActionId, g_i18n:getText("ahl_pickupAnimal"))
-            g_inputBinding:setActionEventActive(self.enterActionId, true)
+            activatePickupPrompt(self, "ahl_pickupAnimal")
             return
 
         elseif closestRejected ~= nil and rejectionReason ~= nil then
@@ -211,8 +269,7 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
                                 ["animalId"] = animalId
                             }
 
-                            g_inputBinding:setActionEventText(self.enterActionId, g_i18n:getText("ahl_pickupAnimal"))
-                            g_inputBinding:setActionEventActive(self.enterActionId, true)
+                            activatePickupPrompt(self, "ahl_pickupAnimal")
                             return
 
                         else
@@ -288,8 +345,7 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
                 ["husbandryId"] = bestHusbandryId,
                 ["animalId"] = bestAnimalId
             }
-            g_inputBinding:setActionEventText(self.enterActionId, g_i18n:getText("ahl_pickupAnimal"))
-            g_inputBinding:setActionEventActive(self.enterActionId, true)
+            activatePickupPrompt(self, "ahl_pickupAnimal")
         end
 
     end
@@ -388,13 +444,27 @@ PlayerInputComponent.update = Utils.appendedFunction(PlayerInputComponent.update
 end)
 
 
-PlayerInputComponent.onInputEnter = Utils.appendedFunction(PlayerInputComponent.onInputEnter, function(self)
+-- Callback for our own AHLPickup action (KEY_e). Replaces the old
+-- appended-onInputEnter spawn flow. Forward-declared at top of file because
+-- this file loads BEFORE AnimalManager.lua via modDesc <extraSourceFiles>,
+-- so the AnimalManager global doesn't exist yet at file-load time. The
+-- callback reads g_animalManager.activePickupInputComponent (stashed every
+-- tick a pickup prompt is shown) to find the player's input component.
+onAHLPickupAction = function()
 
-    if g_time <= g_currentMission.lastInteractionTime + 200 or g_currentMission.interactiveVehicleInRange ~= nil or self.rideablePlaceable ~= nil or self.animalPickup == nil then return end
+    local pic = g_animalManager and g_animalManager.activePickupInputComponent or nil
+    if pic == nil or pic.animalPickup == nil then return end
+    if g_currentMission.interactiveVehicleInRange ~= nil then return end
+    if pic.rideablePlaceable ~= nil then return end
+    if g_time <= (g_currentMission.lastInteractionTime or 0) + 200 then return end
 
-    -- Return carried animal to its original husbandry
-    if self.animalPickup["return"] then
-        local currentHandTool = self.player:getHeldHandTool()
+    -- Consume the pickup so a duplicate fire (e.g. AHLPickup dispatch + the
+    -- polling fallback on setups where both work) doesn't spawn two hand tools.
+    local pickup = pic.animalPickup
+    pic.animalPickup = nil
+
+    if pickup["return"] then
+        local currentHandTool = pic.player:getHeldHandTool()
         if currentHandTool ~= nil then
             g_animalManager:returnCarriedAnimalToHusbandry(currentHandTool)
         end
@@ -405,10 +475,12 @@ PlayerInputComponent.onInputEnter = Utils.appendedFunction(PlayerInputComponent.
     local handTool = _G[handToolType.className].new(g_currentMission:getIsServer(), g_currentMission:getIsClient())
 
     handTool:setType(handToolType)
-    handTool:setLoadCallback(self.onFinishedLoadAnimalPickup, self, { ["animal"] = self.animalPickup })
+    handTool:setLoadCallback(pic.onFinishedLoadAnimalPickup, pic, { ["animal"] = pickup })
     handTool:loadNonStoreItemAHL({ ["ownerFarmId"] = g_localPlayer.farmId, ["isRegistered"] = false, ["holder"] = g_localPlayer }, AHLHandTools.xmlPaths.animal)
 
-end)
+end
+
+
 
 
 function PlayerInputComponent:onFinishedLoadAnimalPickup(handTool, loadingState, args)
@@ -432,3 +504,14 @@ function PlayerInputComponent:onFinishedLoadAnimalPickup(handTool, loadingState,
     end
 
 end
+
+
+-- Backup E-press route. On some setups the engine routes E to onInputEnter
+-- but not to InputAction.AHLPickup; on others (Witcombe) the opposite. Hook
+-- both, debounce via a per-press timestamp so only one spawn happens.
+PlayerInputComponent.onInputEnter = Utils.appendedFunction(PlayerInputComponent.onInputEnter, function(self)
+    if self.animalPickup == nil then return end
+    if g_animalManager == nil then return end
+    if g_animalManager.activePickupInputComponent ~= self then return end
+    onAHLPickupAction()
+end)

@@ -24,5 +24,6 @@
 		<text name="input_HerdingLite" text="Call Dog"/>
 		<text name="input_HerdingLiteUnload" text="Anhänger in Stall entladen"/>
 		<text name="input_HerdingLiteDog" text="Hund zum Hüten umschalten"/>
+		<text name="input_AHLPickup" text="Tier aufheben / zurückbringen"/>
 	</texts>
 </l10n>

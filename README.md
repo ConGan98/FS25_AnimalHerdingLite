@@ -24,7 +24,7 @@ This mod **requires** [RealisticLivestock (RLRM)](https://github.com/rittermod/F
 ### Herding
 - **Walk animals between pastures** -- approach herded animals on foot or in a vehicle and they will move away from you
 - **Realistic reaction behavior** -- animals build and decay arousal based on how close a threat is and whether it is approaching. Calm animals graze; startled animals look, then flee. Vehicles scare from further away and faster than a person on foot
-- **Species-differentiated behavior** -- cows, sheep, pigs, horses, and chickens each have their own perception range, startle/calm thresholds, flocking strength, and grazing cadence (sheep bunch tightly, pigs are stoic, chickens are jumpy, etc.)
+- **Species-differentiated behavior** -- cows, sheep, pigs, horses, chickens, and rabbits each have their own perception range, startle/calm thresholds, flocking strength, and grazing cadence (sheep bunch tightly, pigs are stoic, chickens are jumpy, rabbits huddle and bolt, etc.)
 - **Flocking** -- Reynolds-style cohesion, alignment, and separation so same-species animals stay together in a loose herd while fleeing
 - **Front-neighbor yield** -- animals slow down and idle instead of walking in place when another animal is directly in front of them
 - **Feed bucket attraction** -- equip the feed bucket (purchasable in the Animal Tools store section) and nearby herded animals will follow you instead
@@ -33,7 +33,7 @@ This mod **requires** [RealisticLivestock (RLRM)](https://github.com/rittermod/F
 - **Automatic husbandry entry** -- herded animals are automatically moved into a compatible husbandry when they walk inside it (except their original pen, which becomes available after they leave for a period)
 - **Map hotspots** -- herded animals appear on the minimap for easy tracking
 
-### Dog Herding Experimental
+### Dog Herding Experimental only 50% working
 - **Use your companion dog to gather and drive** -- stand inside a cow or sheep husbandry with a doghouse nearby and press `Left Shift + B` to toggle dog herding
 - **GATHER / DRIVE behavior** -- when animals are scattered the dog runs out to the furthest outlier and pushes it back toward the herd; once the herd is tight the dog parks behind it opposite you, so the group flees toward your position
 - **Passenger mode** -- if your dog is following you and you enter a vehicle that has a `passengerSeat##PlayerSkin` node, the dog rides along seated in the passenger seat (sit animation loop); it resumes following when you exit. Vehicles without a passenger seat node fall through to the default behaviour where the dog returns to its doghouse
@@ -81,7 +81,7 @@ Follow the development progress and known issues on the Trello board:
 |-----|--------|
 | [RealisticLivestock (RLRM)](https://github.com/rittermod/FS25_RealisticLivestockRM) | **Required** -- breed visuals, ear tags, weight-based pickup, full animal info display |
 | MoreVisualAnimals | Compatible |
-| Animal Package Vanilla Edition | Not Working -- needs testing |
+| Animal Package Vanilla Edition | Compatible -- pack uses standard FS25 husbandry/locomotion/animation XML, AHL's existing dual-digit clip-name fallback handles `walk01/run01/idle01` |
 
 ---
 

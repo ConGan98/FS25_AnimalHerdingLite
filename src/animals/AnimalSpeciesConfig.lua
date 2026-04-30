@@ -215,6 +215,39 @@ local BY_NAME = {
 		turnInPlaceMinDeg   = 20,
 		speedAccelMps2      = 3.5,
 	},
+	-- RABBIT tuning. Profile: prey-animal skittish (lower startle threshold and
+	-- slower arousal decay than chicken — they stay wary after a scare), tight
+	-- cohesion (huddle behaviour), small body, very fast acceleration / brief
+	-- pre-flee gaze (rabbits bolt almost immediately). RLRM 1.2.2.0+ Witcombe
+	-- bridge defines RABBIT/RABBIT_MALE subTypes; the rabbit animation XML
+	-- matches AHL's default walk1/idle1/run1 clip naming so no
+	-- AnimalAnimationNaming changes needed.
+	RABBIT = {
+		walkDistance        = 8,
+		runDistance         = 2,
+		turnDistance        = 5,
+		grazeRadius         = 2,
+		maxRunSpeed         = 4.0,
+		grazeSpeedScalar    = 0.40,
+		startleThreshold    = 0.25,
+		calmThreshold       = 0.08,
+		arousalDecayPerSec  = 0.50,
+		alertLingerMs       = 5000,
+		preFleeGazeMs       = 100,
+		flockRadius         = 3,
+		cohesionWeight      = 1.5,
+		alignmentWeight     = 0.5,
+		maxFlockNeighbors   = 6,
+		vehicleRadiusMult   = 2.2,
+		vehicleArousalMult  = 2.0,
+		grazeReselectMs     = { 2000, 6000 },
+		grazeChancePerTick  = 0.040,
+		radius              = 0.15,
+		height              = 0.3,
+		separationWeight    = 0.8,
+		turnInPlaceMinDeg   = 25,
+		speedAccelMps2      = 4.0,
+	},
 }
 
 

@@ -470,6 +470,15 @@ function HerdableAnimal:update(dT)
 	local walkDist = cfg and cfg.walkDistance or HerdableAnimal.WALK_DISTANCE
 	local runDist  = cfg and cfg.runDistance  or HerdableAnimal.RUN_DISTANCE
 
+	-- Refresh terrain height every tick (not just every 10 via updateRelativeToPlayers).
+	-- The async surface raycast is cheap and per-tick firing reduces the
+	-- transition lag from ~10 ticks to ~2 when the animal crosses surface
+	-- boundaries (terrain ↔ shed floor, etc.). Without this the
+	-- onElevatedSurface flag lags ~166 ms behind the animal's actual position
+	-- and the +0.2 step-up flicks on/off causing visible vertical jitter at
+	-- transitions.
+	self:updateTerrainHeight()
+
 	-- Record pre-update position so the post-step geometric push (AnimalManager)
 	-- can tell who actually moved this frame and weight the separation accordingly.
 	self.lastPosition.x = x
@@ -542,7 +551,27 @@ function HerdableAnimal:update(dT)
 		self.collisionController:updateCollisions(state.isTurning)
 		hasCollision, needsYAdjustment = self.collisionController:getHasCollision()
 
-		self.position.y = self.terrainHeight + (needsYAdjustment and 0.2 or 0)
+		-- Skip the +0.2 step-up while standing on an elevated placeable surface
+		-- (shed flooring, road, building platform). The groundLow probe still
+		-- hits the surface mesh as STATIC_OBJECT, but the surface IS the ground
+		-- here — adding +0.2 floats the animal and oscillates with the next
+		-- frame's drop-back-to-surface. The step-up is only needed for stepping
+		-- over small obstacles on raw terrain.
+		local targetStepUp = (needsYAdjustment and not self.onElevatedSurface) and 0.2 or 0
+		-- Smooth toggling so a brief stepUp transition (e.g. crossing a surface
+		-- boundary while the async raycast result is still updating) doesn't
+		-- snap the animal vertically. dT is in ms; ~1.0 m/s ramp = 0.001 m/ms,
+		-- which gives ~200 ms for the full 0.2 m step — fast enough that real
+		-- obstacle step-overs still look natural, slow enough that 1-2 tick
+		-- false-positives on placeable floors barely register visually.
+		self.smoothedStepUp = self.smoothedStepUp or 0
+		local maxDelta = (dT or 16) * 0.001
+		if targetStepUp > self.smoothedStepUp then
+			self.smoothedStepUp = math.min(self.smoothedStepUp + maxDelta, targetStepUp)
+		elseif targetStepUp < self.smoothedStepUp then
+			self.smoothedStepUp = math.max(self.smoothedStepUp - maxDelta, targetStepUp)
+		end
+		self.position.y = self.terrainHeight + self.smoothedStepUp
 
 		if hasCollision then
 
@@ -1410,18 +1439,23 @@ function HerdableAnimal:updateTerrainHeight(updateY)
 
 	local terrainH = getTerrainHeightAtWorldPos(g_terrainNode, self.position.x, 0, self.position.z) + 0.01
 
-	-- Apply the surface height found by the previous async raycast (one 10-tick cycle lag, acceptable).
-	-- This correctly positions the animal on elevated surfaces such as road placeables that sit
-	-- above the terrain mesh and are invisible to getTerrainHeightAtWorldPos.
+	-- Apply the surface height found by the most recent async raycast.
+	-- We deliberately don't clear surfaceRaycastHitY before re-firing — the
+	-- previous valid hit stays in place during the 1-2 tick async window so
+	-- transitions onto/off elevated surfaces (e.g. shed flooring on Witcombe)
+	-- don't briefly fall back to terrain height and snap the cow vertically.
+	-- A new callback simply overwrites the field with the latest hit.
 	if self.surfaceRaycastHitY ~= nil and self.surfaceRaycastHitY > terrainH then
 		self.terrainHeight = self.surfaceRaycastHitY + 0.01
+		self.onElevatedSurface = true
 	else
 		self.terrainHeight = terrainH
+		self.onElevatedSurface = false
 	end
 
-	-- Fire a fresh downward scan so the next cycle has an up-to-date result.
-	-- Ray starts 3 m above terrain and shoots down; first hit = topmost walkable surface.
-	self.surfaceRaycastHitY = nil
+	-- Fire a fresh downward scan. Async = non-blocking; multiple in-flight
+	-- raycasts just overwrite the same field. Ray starts 3 m above terrain
+	-- and shoots down; first hit = topmost walkable surface.
 	raycastAllAsync(self.position.x, terrainH + 3.0, self.position.z, 0, -1, 0, 3.0, "onSurfaceHeightRaycast", self, CollisionFlag.STATIC_OBJECT + CollisionFlag.ROAD)
 
 	if updateY then self.position.y = self.position.y > self.terrainHeight and self.position.y or self.terrainHeight end

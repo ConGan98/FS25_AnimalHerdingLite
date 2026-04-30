@@ -24,5 +24,6 @@
 		<text name="input_HerdingLite" text="Start Herding"/>
 		<text name="input_HerdingLiteUnload" text="Unload Trailer Into Husbandry"/>
 		<text name="input_HerdingLiteDog" text="Toggle Dog Herding"/>
+		<text name="input_AHLPickup" text="Pick Up / Return Animal"/>
 	</texts>
 </l10n>

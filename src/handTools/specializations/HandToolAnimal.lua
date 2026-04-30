@@ -8,6 +8,24 @@ local keyName = "FS25_AnimalHerdingLite.animal"
 -- Uses getAnimClipIndex + assignAnimTrackClip (confirmed FS25 GEX API from AnimalSystem.lua).
 -- Skeleton is at child[0] after createHerdableAnimalFromData normalization.
 -- Chickens have a different node structure and no sleep clip — skip them entirely.
+-- Clip-name fallbacks for the carried-animal sleep pose.
+-- The engine's animated calf i3d uses `sleepSideLBabySource`. Custom packs
+-- (e.g. FS25_AnimalPackage_vanillaEdition) use their own naming convention:
+-- cattle/pig/chicken use `FA_*`, sheep/goat use `BR_*`. We try them in order
+-- and use the first one that exists in the cloned animation set.
+local SLEEP_CLIP_FALLBACKS = {
+    "sleepSideLBabySource",   -- engine baby
+    "sleepSideRBabySource",   -- engine baby alt
+    "FA_sleep01",             -- pack cattle / pig / chicken
+    "FA_sleep02",
+    "BR_sleep01",             -- pack sheep / goat
+    "BR_sleep02",
+    "sleep01",                -- generic
+    "FA_rest01",              -- last-resort (lying-down rest pose)
+    "BR_rest01",
+}
+
+
 local function applySleepPose(node, cache, animalTypeIndex)
 
     if animalTypeIndex == AnimalType.CHICKEN then return end
@@ -32,10 +50,18 @@ local function applySleepPose(node, cache, animalTypeIndex)
     -- sleep clip is the sole contributor and the mesh isn't a blended walk/sleep mix.
     for i = 0, 3 do disableAnimTrack(animSet, i) end
 
-    local clipIndex = getAnimClipIndex(animSet, "sleepSideLBabySource")
+    local clipIndex, clipName
+    for _, name in ipairs(SLEEP_CLIP_FALLBACKS) do
+        local idx = getAnimClipIndex(animSet, name)
+        if idx ~= nil and idx >= 0 then
+            clipIndex = idx
+            clipName = name
+            break
+        end
+    end
     if clipIndex == nil then
-        -- Clip absent (e.g. adult animal) — mesh stays at last frame of whatever was playing.
-        Logging.warning("[AHL] HandToolAnimal: 'sleepSideLBabySource' clip not found — keeping current pose")
+        -- No known sleep clip in this skeleton — mesh stays at last frame of whatever was playing.
+        Logging.warning("[AHL] HandToolAnimal: no known sleep clip found in animation set — keeping current pose")
         return
     end
 
@@ -162,7 +188,20 @@ function HandToolAnimal:onPostLoad(savegame)
 	if cache == nil then return false end
 
 	local node
-	if AnimalManager.CONFLICTS.REALISTIC_LIVESTOCK and cache.root ~= nil and cache.root ~= 0 then
+	if AnimalManager.CONFLICTS.ANIMAL_PACK_VANILLA and cache.root ~= nil and cache.root ~= 0 then
+		-- Pack path: clone animated i3d for sleep pose, skip applyRLVisuals
+		-- (would crash on pack i3d). See note in setEngineAnimal.
+		node = clone(cache.root, false, false, false)
+		link(self.graphicalNode, node)
+		setVisibility(node, true)
+		local meshNode = I3DUtil.indexToObject(node, cache.mesh)
+		if spec.tiles ~= nil and meshNode ~= nil and meshNode ~= 0 then
+			local x, y, z, w = unpack(spec.tiles)
+			I3DUtil.setShaderParameterRec(meshNode, "atlasInvSizeAndOffsetUV", x, y, z, w, false)
+		end
+		I3DUtil.setShaderParameterRec(node, "dirt", 0, nil, nil, nil)
+		applySleepPose(node, cache, spec.animalTypeIndex)
+	elseif AnimalManager.CONFLICTS.REALISTIC_LIVESTOCK and cache.root ~= nil and cache.root ~= 0 then
 		node = clone(cache.root, false, false, false)
 		link(self.graphicalNode, node)
 		setVisibility(node, true)
@@ -269,11 +308,15 @@ function HandToolAnimal:setEngineAnimal(husbandryId, animalId)
 	local spec = self[specName]
 
 	local husbandry = g_currentMission.husbandrySystem:getClusterHusbandryById(husbandryId)
+	if husbandry == nil then return false end
 	local animal = husbandry:getClusterByAnimalId(animalId, husbandryId)
+	if animal == nil then return false end
 	local clonedAnimal
 	if animal.clone ~= nil then
 		-- RL Animal: use clone() which copies all fields (birthday, uniqueId, farmId, etc.)
-		clonedAnimal = animal:clone()
+		local okC, c = pcall(animal.clone, animal)
+		if not okC then return false end
+		clonedAnimal = c
 	else
 		-- Vanilla AnimalCluster: use built-in attribute copy
 		clonedAnimal = animal:class().new()
@@ -291,7 +334,25 @@ function HandToolAnimal:setEngineAnimal(husbandryId, animalId)
 	if cache == nil then return false end
 
 	local node
-	if AnimalManager.CONFLICTS.REALISTIC_LIVESTOCK then
+	if AnimalManager.CONFLICTS.ANIMAL_PACK_VANILLA and cache.root ~= nil and cache.root ~= 0 then
+		-- Custom-pack path: clone the animated i3d (so the carried animal has a
+		-- skeleton + animation set we can pose) but DO NOT call applyRLVisuals —
+		-- RL's safeIndexToObject paths are designed for the engine's node
+		-- hierarchy and corrupt state on pack i3ds, native-crashing one frame
+		-- later when the engine renders the carried animal. applySleepPose's
+		-- expanded clip-name fallback (FA_sleep01 / BR_sleep01 / etc.) covers
+		-- the pack's clip naming.
+		local cloneNode = clone(cache.root, false, false, false)
+		link(self.graphicalNode, cloneNode)
+		setVisibility(cloneNode, true)
+		local meshNode = I3DUtil.indexToObject(cloneNode, cache.mesh)
+		if meshNode ~= nil and meshNode ~= 0 then
+			I3DUtil.setShaderParameterRec(meshNode, "atlasInvSizeAndOffsetUV", x, y, z, w, false)
+		end
+		I3DUtil.setShaderParameterRec(cloneNode, "dirt", 0, nil, nil, nil)
+		applySleepPose(cloneNode, cache, animalTypeIndex)
+		node = cloneNode
+	elseif AnimalManager.CONFLICTS.REALISTIC_LIVESTOCK and not AnimalManager.CONFLICTS.ANIMAL_PACK_VANILLA then
 		-- For pen animals we can't steal a node, so try applyRLVisuals on a fresh clone.
 		-- If va:load() crashes (RLRM font issue), fall back to the vanilla posed model.
 		if cache.root ~= nil and cache.root ~= 0 then
@@ -365,6 +426,11 @@ function HandToolAnimal:setHerdingAnimal(animalNode, farmId)
 	if cache == nil then return false end
 
 	local node
+	-- Both RL-only and RL+pack setups can steal the herded mesh: it's already
+	-- cloned with the right textures (applyRLVisuals ran at herding spawn for
+	-- RL-only; for the pack, the herded mesh is the pack's animated i3d with
+	-- atlas UV already applied). applySleepPose's clip-name fallback handles
+	-- both engine and pack skeletons.
 	if AnimalManager.CONFLICTS.REALISTIC_LIVESTOCK then
 		node = stealHerdedRLVisualNode(self.graphicalNode, cache, animal, animalTypeIndex)
 	else

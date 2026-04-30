@@ -123,10 +123,14 @@ Outils manuels :
 		<actionBinding action="HerdingLiteDog">
 			<binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_b"/>
 		</actionBinding>
+		<actionBinding action="AHLPickup">
+			<binding device="KB_MOUSE_DEFAULT" input="KEY_e"/>
+		</actionBinding>
 	</inputBinding>
 	<actions>
 		<action name="HerdingLite"/>
 		<action name="HerdingLiteUnload"/>
 		<action name="HerdingLiteDog"/>
+		<action name="AHLPickup"/>
 	</actions>
 </modDesc>

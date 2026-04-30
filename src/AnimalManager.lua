@@ -1025,6 +1025,38 @@ function AnimalManager:validateConflicts()
     AnimalManager.CONFLICTS.REALISTIC_LIVESTOCK = g_modIsLoaded["FS25_RealisticLivestock"] or g_modIsLoaded["FS25_RealisticLivestockRM"]
     AnimalManager.CONFLICTS.MORE_VISUAL_ANIMALS = g_modIsLoaded["FS25_MoreVisualAnimals"]
 
+    -- Detect when an "override" animal pack (e.g. FS25_AnimalPackage_vanillaEdition)
+    -- has been wired into RLRM via the in-game RL settings ("Use Custom Animals" +
+    -- "Set Animals XML Path"). The pack isn't a normal Lua-loaded mod — its
+    -- AnimalsLoader.lua patches AnimalSystem directly when RLRM points at it,
+    -- so g_modIsLoaded never sees it. The runtime toggle lives in
+    -- RLSettings.SETTINGS.useCustomAnimals.state (1=off, 2=on); when on,
+    -- RLSettings.animalsXMLPath holds the pack's animals XML path.
+    --
+    -- Pack i3ds use custom skeletons / node hierarchies that RL's VisualAnimal
+    -- va:load() can't walk — running it against a pack i3d corrupts the cloned
+    -- mesh state and the engine native-crashes one frame later when rendering
+    -- the carried animal (no Lua-level log). When the toggle is on we route
+    -- pickup spawns through the vanilla `buildVisualNode(cache.posed)` path
+    -- which uses the pack's static posed i3d — no animation set walk, no
+    -- safeIndexToObject paths to break.
+    -- RLSettings lives in RLRM's mod environment (not the global root scope), so
+    -- we have to reach it through the mod table FS25_RealisticLivestockRM /
+    -- FS25_RealisticLivestock — same access pattern AHL uses elsewhere for
+    -- rlMod.source(...) cross-mod calls.
+    AnimalManager.CONFLICTS.ANIMAL_PACK_VANILLA = false
+    local rlMod = FS25_RealisticLivestock or FS25_RealisticLivestockRM
+    local rlSettings = rlMod and rlMod.RLSettings or nil
+    if rlSettings ~= nil and type(rlSettings.SETTINGS) == "table"
+            and type(rlSettings.SETTINGS.useCustomAnimals) == "table"
+            and rlSettings.SETTINGS.useCustomAnimals.state == 2
+            and rlSettings.animalsXMLPath ~= nil
+    then
+        AnimalManager.CONFLICTS.ANIMAL_PACK_VANILLA = true
+        Logging.info("[AHL] Custom animal pack detected via RLSettings (path=%s) — pickup uses pack-aware visual path",
+            tostring(rlSettings.animalsXMLPath))
+    end
+
     if AnimalManager.CONFLICTS.REALISTIC_LIVESTOCK then
         local rlMod = FS25_RealisticLivestock or FS25_RealisticLivestockRM
         rlMod.source(modDirectory .. "src/animals/husbandry/cluster/Animal.lua")
@@ -1535,6 +1567,14 @@ function AnimalManager:returnAnimalToTrailer(farmId, animalIndex, trailer)
 
     trailer:addCluster(animal.cluster)
 
+    -- RLRM 1.2.2.0 moved the cluster-system flush out of addCluster into the
+    -- caller (LivestockTrailer:addAnimals batches updateNow at the tail). When
+    -- we call addCluster directly we have to flush ourselves or the cluster
+    -- sits in the pending-add queue and the trailer appears empty.
+    if trailer.spec_livestockTrailer ~= nil and trailer.spec_livestockTrailer.clusterSystem ~= nil then
+        pcall(trailer.spec_livestockTrailer.clusterSystem.updateNow, trailer.spec_livestockTrailer.clusterSystem)
+    end
+
     animal:delete()
     table.remove(farm.animals, animalIndex)
 
@@ -1925,6 +1965,12 @@ function AnimalManager:loadCarriedAnimalIntoTrailer(handTool, trailer)
 
     trailer:addCluster(animal)
 
+    -- Flush the trailer's pending-add queue so the cluster is actually
+    -- present this frame — see comment in returnAnimalToTrailer.
+    if trailer.spec_livestockTrailer.clusterSystem ~= nil then
+        pcall(trailer.spec_livestockTrailer.clusterSystem.updateNow, trailer.spec_livestockTrailer.clusterSystem)
+    end
+
     for i = #self.carriedAnimals, 1, -1 do
         if self.carriedAnimals[i].handTool == handTool then
             table.remove(self.carriedAnimals, i)
@@ -2123,6 +2169,7 @@ function AnimalManager:refreshHerdingFootEvent()
     local active = inRange or herdingActive
 
     local oldFootId = self.herdingEventId
+    local oldPickupId = self.pickupEventId
 
     g_inputBinding:beginActionEventsModification(PlayerInputComponent.INPUT_CONTEXT_NAME)
 
@@ -2135,7 +2182,32 @@ function AnimalManager:refreshHerdingFootEvent()
         false, true, false, true, nil, false
     )
 
+    -- Also refresh AHLPickup (pickup E-key event). After vehicle-teleport input
+    -- context churn the prompt would otherwise stay invisible until the next
+    -- registerGlobalPlayerActionEvents fires (which doesn't always happen on
+    -- teleport-via-map). Same begin/end transaction.
+    local newPickupId
+    if InputAction.AHLPickup ~= nil and self._onAHLPickupAction ~= nil then
+        if oldPickupId ~= nil and oldPickupId ~= "" then
+            g_inputBinding:removeActionEvent(oldPickupId)
+        end
+        _, newPickupId = g_inputBinding:registerActionEvent(
+            InputAction.AHLPickup, AnimalManager, self._onAHLPickupAction,
+            false, true, false, true, nil, false
+        )
+    end
+
     g_inputBinding:endActionEventsModification()
+
+    if newPickupId ~= nil and newPickupId ~= "" then
+        self.pickupEventId = newPickupId
+        g_inputBinding:setActionEventTextPriority(newPickupId, GS_PRIO_VERY_HIGH)
+        -- Default the prompt off; the next PlayerInputComponent.update tick
+        -- re-runs the proximity check and calls activatePickupPrompt if a
+        -- pickup target is in range.
+        g_inputBinding:setActionEventActive(newPickupId, false)
+        g_inputBinding:setActionEventTextVisibility(newPickupId, false)
+    end
 
     if newEventId == nil or newEventId == "" then return end
 
