@@ -44,7 +44,13 @@ function HerdingPlayerSyncEvent:readStream(streamId, connection)
 
         end
 
-        farms[farmId].players = positions
+        -- Two race windows where the client-side farm record may not yet
+        -- exist for an inbound player-sync: (a) mid-join, before the
+        -- HerdingEvent initial-state burst lands, and (b) cross-farm,
+        -- where the per-farm HerdingEvent for a newly-started farm hasn't
+        -- been processed yet. Bytes are already consumed above; just
+        -- skip the assignment if the record isn't there.
+        if farms[farmId] ~= nil then farms[farmId].players = positions end
         playerPositions[farmId] = positions
 
     end
@@ -55,6 +61,13 @@ end
 
 
 function HerdingPlayerSyncEvent:writeStream(streamId, connection)
+
+    -- Mirror the guard in HerdingSyncEvent: skip clients that haven't
+    -- finished receiving their initial state. Without this, a tick can
+    -- broadcast a player-sync to a connection in g_server.clientConnections
+    -- whose HerdingEvent initial-state burst hasn't been queued yet —
+    -- reader would crash on missing farm records.
+    if not g_animalManager:getIsConnectionInitialised(connection) then return end
 
     local playerPositions = g_animalManager.playerPositions
     local numFarms = 0

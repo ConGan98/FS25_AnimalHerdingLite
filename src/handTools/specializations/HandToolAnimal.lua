@@ -470,7 +470,19 @@ function HandToolAnimal:onDelete()
 
 	if g_localPlayer == nil then return end
 
-	self[specName].player:setIsCarryingAnimal(false)
-	g_localPlayer.hudUpdater:setCarriedAnimal()
+	-- spec.player is only set by loadAnimal / loadFromPostLoad. If
+	-- setEngineAnimal returned false (e.g. cache miss for a species visual
+	-- index the mod doesn't yet cache, like a Hof Bergmann drake's
+	-- visualAnimalIndex), the handtool gets markHandToolForDeletion'd
+	-- before loadAnimal ever fires — spec.player stays nil. Bail so the
+	-- pickup-failure path doesn't crash on top of the original failure.
+	local spec = self[specName]
+	if spec ~= nil and spec.player ~= nil then
+		spec.player:setIsCarryingAnimal(false)
+	end
+
+	if g_localPlayer.hudUpdater ~= nil then
+		g_localPlayer.hudUpdater:setCarriedAnimal()
+	end
 
 end

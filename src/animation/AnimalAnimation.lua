@@ -17,10 +17,16 @@ function AnimalAnimation.new(animal, animationSet, animationCache)
 	self.currentAnimationTime = 0
 	self.targetAnimationTime = 10000
 
-	setAnimTrackLoopState(animationSet, 0, true)
-	setAnimTrackLoopState(animationSet, 1, true)
-	setAnimTrackLoopState(animationSet, 2, true)
-	setAnimTrackLoopState(animationSet, 3, true)
+	-- animationSet can be 0 / nil if the source i3d failed to load or has no
+	-- skeleton. Calling setAnimTrackLoopState on a bad set crashes the engine;
+	-- skip the loop init so the rest of the animation plumbing can degrade
+	-- gracefully (tracks won't play but the animal still moves).
+	if animationSet ~= nil and animationSet ~= 0 then
+		setAnimTrackLoopState(animationSet, 0, true)
+		setAnimTrackLoopState(animationSet, 1, true)
+		setAnimTrackLoopState(animationSet, 2, true)
+		setAnimTrackLoopState(animationSet, 3, true)
+	end
 
 	self.currentAnimationTime = 0
 

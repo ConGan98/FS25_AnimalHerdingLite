@@ -75,6 +75,24 @@ AnimalSpeciesConfig = {}
 --                           animation transition completes and speedId flips.
 --                           Does not affect animation playback rate — the
 --                           animation engine's own clip-blend handles visuals.
+--
+-- -- ANTICIPATORY STEERING (Layer 1) -----------------------------------------
+--   lookaheadDist     (m)   Max length of the −45°/0°/+45° ahead probe rays.
+--                           If the locomotion XML provides a `detectionDistance`
+--                           attribute (engine + most pack XMLs do) it overrides
+--                           this default. Bigger = sees walls earlier.
+--   lookaheadAngleDeg       Side-ray angle off the heading. 45° works for most
+--                           bodies; chickens/rabbits use a narrower fan.
+--   wallBiasStrength        How strongly a blocked centre ray deflects the
+--                           heading toward the clearer flank. Range 0..1+;
+--                           higher = sharper turns near walls.
+--
+-- -- OBSTACLE MEMORY (Layer 2 — anti-oscillation) ---------------------------
+--   obstacleMemoryMs        How long an obstacle position stays remembered
+--                           after a stuck-escape, in ms. Default 5000.
+--   obstacleMemoryRadius (m) Max distance at which a remembered obstacle
+--                           can still influence the heading.
+--   obstacleMemoryWeight    Repulsion strength applied while the entry is live.
 -- ============================================================================
 
 
@@ -110,6 +128,12 @@ local BY_NAME = {
 		separationWeight    = 0.5,
 		turnInPlaceMinDeg   = 30,
 		speedAccelMps2      = 2.0,
+		lookaheadDist       = 5.0,
+		lookaheadAngleDeg   = 45,
+		wallBiasStrength    = 0.7,
+		obstacleMemoryMs    = 5000,
+		obstacleMemoryRadius = 4.5,
+		obstacleMemoryWeight = 0.8,
 	},
 	SHEEP = {
 		walkDistance        = 14,
@@ -136,6 +160,12 @@ local BY_NAME = {
 		separationWeight    = 1.2,
 		turnInPlaceMinDeg   = 30,
 		speedAccelMps2      = 2.5,
+		lookaheadDist       = 4.0,
+		lookaheadAngleDeg   = 45,
+		wallBiasStrength    = 0.7,
+		obstacleMemoryMs    = 5000,
+		obstacleMemoryRadius = 4.0,
+		obstacleMemoryWeight = 0.9,
 	},
 	PIG = {
 		walkDistance        = 12,
@@ -162,6 +192,12 @@ local BY_NAME = {
 		separationWeight    = 1.0,
 		turnInPlaceMinDeg   = 30,
 		speedAccelMps2      = 2.5,
+		lookaheadDist       = 3.5,
+		lookaheadAngleDeg   = 45,
+		wallBiasStrength    = 0.6,
+		obstacleMemoryMs    = 4000,
+		obstacleMemoryRadius = 3.5,
+		obstacleMemoryWeight = 0.7,
 	},
 	HORSE = {
 		walkDistance        = 20,
@@ -188,6 +224,12 @@ local BY_NAME = {
 		separationWeight    = 0.9,
 		turnInPlaceMinDeg   = 30,
 		speedAccelMps2      = 2.0,
+		lookaheadDist       = 6.0,
+		lookaheadAngleDeg   = 40,
+		wallBiasStrength    = 0.7,
+		obstacleMemoryMs    = 6000,
+		obstacleMemoryRadius = 5.0,
+		obstacleMemoryWeight = 0.8,
 	},
 	CHICKEN = {
 		walkDistance        = 10,
@@ -214,6 +256,12 @@ local BY_NAME = {
 		separationWeight    = 1.4,
 		turnInPlaceMinDeg   = 20,
 		speedAccelMps2      = 3.5,
+		lookaheadDist       = 2.0,
+		lookaheadAngleDeg   = 35,
+		wallBiasStrength    = 0.8,
+		obstacleMemoryMs    = 3000,
+		obstacleMemoryRadius = 2.0,
+		obstacleMemoryWeight = 0.7,
 	},
 	-- RABBIT tuning. Profile: prey-animal skittish (lower startle threshold and
 	-- slower arousal decay than chicken — they stay wary after a scare), tight
@@ -247,6 +295,155 @@ local BY_NAME = {
 		separationWeight    = 0.8,
 		turnInPlaceMinDeg   = 25,
 		speedAccelMps2      = 4.0,
+		lookaheadDist       = 1.5,
+		lookaheadAngleDeg   = 30,
+		wallBiasStrength    = 1.0,
+		obstacleMemoryMs    = 4000,
+		obstacleMemoryRadius = 1.5,
+		obstacleMemoryWeight = 1.0,
+	},
+	-- GOOSE tuning. Hof Bergmann ships geese (and the RLRM bridge adds
+	-- GOOSE_MALE). Profile: mob-flocking (geese cluster tight when alarmed),
+	-- moderate startle, moderate body size. Skipped silently on maps that
+	-- don't register AnimalType.GOOSE.
+	GOOSE = {
+		walkDistance        = 12,
+		runDistance         = 3,
+		turnDistance        = 9,
+		grazeRadius         = 4,
+		maxRunSpeed         = 4.0,
+		grazeSpeedScalar    = 0.40,
+		startleThreshold    = 0.35,
+		calmThreshold       = 0.10,
+		arousalDecayPerSec  = 0.55,
+		alertLingerMs       = 4000,
+		preFleeGazeMs       = 200,
+		flockRadius         = 5,
+		cohesionWeight      = 1.2,
+		alignmentWeight     = 0.7,
+		maxFlockNeighbors   = 5,
+		vehicleRadiusMult   = 1.8,
+		vehicleArousalMult  = 1.7,
+		grazeReselectMs     = { 3500, 9000 },
+		grazeChancePerTick  = 0.025,
+		radius              = 0.30,
+		height              = 0.7,
+		separationWeight    = 1.1,
+		turnInPlaceMinDeg   = 25,
+		speedAccelMps2      = 3.5,
+		lookaheadDist       = 4.0,
+		lookaheadAngleDeg   = 40,
+		wallBiasStrength    = 0.7,
+		obstacleMemoryMs    = 5000,
+		obstacleMemoryRadius = 4.0,
+		obstacleMemoryWeight = 0.85,
+	},
+	-- CAT tuning. Hof Bergmann ships cats (kittens + female colour variants;
+	-- RLRM bridge adds TOMCAT). Profile: solitary (loose flock, low cohesion),
+	-- nimble (high accel, high run speed), high startle threshold (cats tolerate
+	-- a fair amount before bolting), short alert linger.
+	CAT = {
+		walkDistance        = 8,
+		runDistance         = 2,
+		turnDistance        = 5,
+		grazeRadius         = 3,
+		maxRunSpeed         = 5.0,
+		grazeSpeedScalar    = 0.50,
+		startleThreshold    = 0.45,
+		calmThreshold       = 0.15,
+		arousalDecayPerSec  = 0.65,
+		alertLingerMs       = 2500,
+		preFleeGazeMs       = 250,
+		flockRadius         = 3,
+		cohesionWeight      = 0.4,
+		alignmentWeight     = 0.2,
+		maxFlockNeighbors   = 3,
+		vehicleRadiusMult   = 1.6,
+		vehicleArousalMult  = 1.5,
+		grazeReselectMs     = { 4000, 11000 },
+		grazeChancePerTick  = 0.020,
+		radius              = 0.18,
+		height              = 0.4,
+		separationWeight    = 1.5,
+		turnInPlaceMinDeg   = 20,
+		speedAccelMps2      = 4.0,
+		lookaheadDist       = 3.0,
+		lookaheadAngleDeg   = 30,
+		wallBiasStrength    = 0.7,
+		obstacleMemoryMs    = 3500,
+		obstacleMemoryRadius = 2.5,
+		obstacleMemoryWeight = 0.7,
+	},
+	-- ALPACA tuning. Hof Bergmann ships adults + young in 4 colour variants;
+	-- RLRM bridge adds ALPACA_*_MALE per colour. Profile: sheep-likes —
+	-- calm-cohesive flocking, mid-range perception, taller body than sheep.
+	ALPACA = {
+		walkDistance        = 14,
+		runDistance         = 4,
+		turnDistance        = 11,
+		grazeRadius         = 6,
+		maxRunSpeed         = 4.0,
+		grazeSpeedScalar    = 0.40,
+		startleThreshold    = 0.35,
+		calmThreshold       = 0.10,
+		arousalDecayPerSec  = 0.40,
+		alertLingerMs       = 6000,
+		preFleeGazeMs       = 350,
+		flockRadius         = 6,
+		cohesionWeight      = 1.0,
+		alignmentWeight     = 0.7,
+		maxFlockNeighbors   = 5,
+		vehicleRadiusMult   = 1.6,
+		vehicleArousalMult  = 1.5,
+		grazeReselectMs     = { 5500, 13000 },
+		grazeChancePerTick  = 0.018,
+		radius              = 0.45,
+		height              = 1.1,
+		separationWeight    = 0.9,
+		turnInPlaceMinDeg   = 30,
+		speedAccelMps2      = 2.5,
+		lookaheadDist       = 4.5,
+		lookaheadAngleDeg   = 45,
+		wallBiasStrength    = 0.6,
+		obstacleMemoryMs    = 5500,
+		obstacleMemoryRadius = 5.0,
+		obstacleMemoryWeight = 0.8,
+	},
+	-- QUAIL tuning. Hof Bergmann ships quail (RLRM bridge adds QUAIL_MALE).
+	-- Profile: tiny body, hyper-skittish, very tight huddle, near-instant flee
+	-- response. Quail uses base-game chicken animations under the hood
+	-- (AnimalType-specific config is what matters here, not animation source).
+	QUAIL = {
+		walkDistance        = 6,
+		runDistance         = 1.5,
+		turnDistance        = 4,
+		grazeRadius         = 2,
+		maxRunSpeed         = 4.5,
+		grazeSpeedScalar    = 0.40,
+		startleThreshold    = 0.20,
+		calmThreshold       = 0.06,
+		arousalDecayPerSec  = 0.45,
+		alertLingerMs       = 4500,
+		preFleeGazeMs       = 80,
+		flockRadius         = 2.5,
+		cohesionWeight      = 1.6,
+		alignmentWeight     = 0.5,
+		maxFlockNeighbors   = 6,
+		vehicleRadiusMult   = 2.0,
+		vehicleArousalMult  = 1.9,
+		grazeReselectMs     = { 2000, 5500 },
+		grazeChancePerTick  = 0.045,
+		radius              = 0.12,
+		height              = 0.25,
+		separationWeight    = 0.7,
+		turnInPlaceMinDeg   = 18,
+		speedAccelMps2      = 4.5,
+		lookaheadDist       = 2.0,
+		lookaheadAngleDeg   = 25,
+		wallBiasStrength    = 0.8,
+		obstacleMemoryMs    = 3000,
+		obstacleMemoryRadius = 2.0,
+		obstacleMemoryWeight = 0.9,
 	},
 }
 

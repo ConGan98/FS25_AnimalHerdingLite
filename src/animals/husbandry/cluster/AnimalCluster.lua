@@ -8,6 +8,8 @@ function AnimalCluster:getCanBePickedUp()
 	if animalTypeIndex == AnimalType.HORSE then return false end
 	if animalTypeIndex == AnimalType.CHICKEN then return self.age < 60 end
 
-	return self.age < 6
+	-- Map-bridge species (RABBIT / GOOSE / CAT / ALPACA / QUAIL / etc.)
+	-- intentionally NOT pickup-able — see Animal.lua comment for rationale.
+	return false
 
 end

@@ -17,6 +17,26 @@ end
 HandTool.load = Utils.overwrittenFunction(HandTool.load, AHL_HandTool.load)
 
 
+-- Release the shared i3d reference acquired via loadSharedI3DFileAsync at load
+-- time. Without this, every animal pickup permanently bumps the engine's
+-- shared-i3d refcount; over a long play session the leak compounds.
+-- The actual scene-graph node was deleted at the end of loadFinishedNonStoreItemAHL
+-- (`delete(self.i3dNode)`), so by delete-time this is purely a refcount drop —
+-- safe to release immediately, no deferred queue needed.
+function AHL_HandTool:delete(superFunc)
+
+	if self.isAHL and self.sharedLoadRequestId ~= nil and self.sharedLoadRequestId ~= 0 then
+		pcall(g_i3DManager.releaseSharedI3DFile, g_i3DManager, self.sharedLoadRequestId)
+		self.sharedLoadRequestId = nil
+	end
+
+	return superFunc(self)
+
+end
+
+HandTool.delete = Utils.overwrittenFunction(HandTool.delete, AHL_HandTool.delete)
+
+
 function HandTool:loadNonStoreItemAHL(data, xmlFile)
 
 	self.isAHL = true

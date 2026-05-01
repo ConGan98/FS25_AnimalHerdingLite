@@ -289,6 +289,37 @@ function AnimalManager:update(dT)
             farmTrailers = trailers[farmId]
         end
 
+        -- Bucket-following herd centroid. When the player leads animals with
+        -- a bucket, stragglers that fall outside the bucket's sustain range
+        -- (50 m) need something to keep them moving — otherwise they idle /
+        -- graze and the herd shrinks. The centroid gives them a "rejoin the
+        -- herd" target so a few mid-pack animals act as a carrier that pulls
+        -- back-of-pack animals toward the bucket.
+        --
+        -- Use bucketCatchupUntil (60 s) rather than bucketFollowUntil (12 s)
+        -- as the inclusion criterion. With the shorter timer, if EVERY animal
+        -- briefly falls past 50 m the centroid disappears, the catch-up
+        -- target vanishes, and the whole herd dissolves at once. The longer
+        -- catch-up window keeps the centroid alive across temporary mass
+        -- disengagements as long as at least ONE animal was engaged in the
+        -- last 60 s.
+        do
+            local now = g_time or 0
+            local cnt, sx, sz = 0, 0, 0
+            for _, a in ipairs(farm.animals) do
+                if (a.bucketCatchupUntil or 0) > now then
+                    sx = sx + a.position.x
+                    sz = sz + a.position.z
+                    cnt = cnt + 1
+                end
+            end
+            if cnt > 0 then
+                farm.bucketHerdCentroid = { x = sx / cnt, z = sz / cnt, count = cnt }
+            else
+                farm.bucketHerdCentroid = nil
+            end
+        end
+
         for i, animal in ipairs(farm.animals) do
 
             if updateRelativeToPlaceables and farmPlaceables ~= nil then
@@ -340,21 +371,39 @@ function AnimalManager:update(dT)
 
             if not loadedIntoTrailer then
                 -- Query same-farm neighbors from spatial hash for flocking.
-                local neighbors = {}
-                do
-                    local cxg = math.floor(animal.position.x / NEIGHBOR_CELL)
-                    local czg = math.floor(animal.position.z / NEIGHBOR_CELL)
-                    for ox = -1, 1 do
-                        for oz = -1, 1 do
-                            local cell = animalGrid[(cxg + ox) * 65536 + (czg + oz)]
-                            if cell ~= nil then
-                                for _, o in ipairs(cell) do
-                                    if o ~= animal then neighbors[#neighbors + 1] = o end
+                -- Reuse a single farm-level neighbors table — clear and
+                -- repopulate per animal instead of allocating a fresh one.
+                -- The result is consumed by the caller before the next
+                -- iteration overwrites it (HerdableAnimal stashes it on
+                -- ._frameNeighbors at the bottom of this block, but the
+                -- consumer reads from that stash on the same tick — safe to
+                -- share the underlying table across animals because each
+                -- animal's update reads the snapshot that was current when
+                -- it was passed in).
+                local neighbors = farm._neighborsScratch
+                if neighbors == nil then
+                    neighbors = {}
+                    farm._neighborsScratch = neighbors
+                end
+                local nCount = 0
+                local cxg = math.floor(animal.position.x / NEIGHBOR_CELL)
+                local czg = math.floor(animal.position.z / NEIGHBOR_CELL)
+                for ox = -1, 1 do
+                    for oz = -1, 1 do
+                        local cell = animalGrid[(cxg + ox) * 65536 + (czg + oz)]
+                        if cell ~= nil then
+                            for _, o in ipairs(cell) do
+                                if o ~= animal then
+                                    nCount = nCount + 1
+                                    neighbors[nCount] = o
                                 end
                             end
                         end
                     end
                 end
+                -- Trim trailing entries from the previous animal's larger query
+                -- so #neighbors is correct.
+                for k = nCount + 1, #neighbors do neighbors[k] = nil end
                 -- Stash for animal:update() so its front-neighbor yield can reuse
                 -- the same list without a second spatial-hash query.
                 animal._frameNeighbors = neighbors
@@ -369,6 +418,10 @@ function AnimalManager:update(dT)
                 -- still appears in the shared `players` list (via
                 -- g_dogHerding:getInfluencers) and contributes to arousal
                 -- buildup; the synthetic just overrides the direction.
+                -- Reuse a single farm-wide players-with-guide list to avoid
+                -- allocating a fresh table per animal each steering cycle.
+                -- The base copy of `players` is built once for the farm; per
+                -- animal we just rewrite the trailing guide slot in place.
                 local animalPlayers = players
                 if dogGuideActive and guideTargetX ~= nil then
                     local ax, az = animal.position.x, animal.position.z
@@ -378,17 +431,37 @@ function AnimalManager:update(dT)
                         local gux, guz = gdx / gdl, gdz / gdl
                         local gtx = ax + gux * GUIDE_SYNTHETIC_DIST
                         local gtz = az + guz * GUIDE_SYNTHETIC_DIST
-                        animalPlayers = {}
-                        for _, p in ipairs(players) do animalPlayers[#animalPlayers + 1] = p end
-                        -- { x, z, isBucket, isVehicle, isGuide } — the
-                        -- isGuide flag tells HerdableAnimal's sense stage
-                        -- to use this influencer for flee DIRECTION only;
-                        -- it does not build arousal, so animals near the
-                        -- synthetic aren't permanently panicked.
-                        animalPlayers[#animalPlayers + 1] = { gtx, gtz, false, false, true }
+
+                        if farm._playersWithGuide == nil
+                            or farm._playersWithGuideBaseN ~= #players
+                        then
+                            -- Rebuild the base copy whenever the player list size
+                            -- changes (player joined/left, vehicle entered, etc.).
+                            local base = {}
+                            for i = 1, #players do base[i] = players[i] end
+                            -- Reusable guide slot — { x, z, isBucket, isVehicle, isGuide }.
+                            -- isGuide tells HerdableAnimal's sense stage to use this
+                            -- influencer for flee DIRECTION only; doesn't build arousal.
+                            base[#players + 1] = { 0, 0, false, false, true }
+                            farm._playersWithGuide = base
+                            farm._playersWithGuideBaseN = #players
+                        else
+                            -- Re-sync base entries from the live players list in
+                            -- case any pre-guide entry was mutated this tick.
+                            for i = 1, #players do farm._playersWithGuide[i] = players[i] end
+                        end
+
+                        local guideEntry = farm._playersWithGuide[#players + 1]
+                        guideEntry[1] = gtx
+                        guideEntry[2] = gtz
+                        animalPlayers = farm._playersWithGuide
                     end
                 end
 
+                -- Hand the bucket-herd centroid to the animal so its
+                -- catch-up logic in updateRelativeToPlayers can use it as
+                -- a fallback target when the bucket itself is out of reach.
+                animal.bucketHerdCentroid = farm.bucketHerdCentroid
                 animal:updateRelativeToPlayers(animalPlayers, updateRelativeToPlayers, dtSec, neighbors)
                 animal:update(dT)
             end
@@ -1068,6 +1141,11 @@ end
 
 function AnimalManager:configureCollisionControllerOffsets()
 
+    -- Map-bridge species (RABBIT from Witcombe; GOOSE/CAT/ALPACA/QUAIL from
+    -- Hof Bergmann) are added conditionally — `AnimalType.X` is nil when the
+    -- engine hasn't registered that species, so wrap each entry in a guard
+    -- before adding to the table. Missing-species entries simply don't get
+    -- created, and AHL falls back to default (0) elsewhere.
     AnimalManager.ANIMAL_TYPE_INDEX_TO_AGE_OFFSET = {
         [AnimalType.COW] = 12,
 	    [AnimalType.PIG] = 6,
@@ -1075,6 +1153,12 @@ function AnimalManager:configureCollisionControllerOffsets()
 	    [AnimalType.HORSE] = 0,
 	    [AnimalType.CHICKEN] = 6
     }
+
+    if AnimalType.RABBIT ~= nil then AnimalManager.ANIMAL_TYPE_INDEX_TO_AGE_OFFSET[AnimalType.RABBIT] = 3 end
+    if AnimalType.GOOSE  ~= nil then AnimalManager.ANIMAL_TYPE_INDEX_TO_AGE_OFFSET[AnimalType.GOOSE]  = 3 end
+    if AnimalType.CAT    ~= nil then AnimalManager.ANIMAL_TYPE_INDEX_TO_AGE_OFFSET[AnimalType.CAT]    = 6 end
+    if AnimalType.ALPACA ~= nil then AnimalManager.ANIMAL_TYPE_INDEX_TO_AGE_OFFSET[AnimalType.ALPACA] = 6 end
+    if AnimalType.QUAIL  ~= nil then AnimalManager.ANIMAL_TYPE_INDEX_TO_AGE_OFFSET[AnimalType.QUAIL]  = 2 end
 
 end
 
@@ -1267,6 +1351,18 @@ function AnimalManager:addAnimalTypeToCache(animalType, baseDirectory)
                         cache.locomotionWalkSpeed = locomotionXML:getFloat("locomotion.speed#walk", nil)
                         cache.locomotionRunSpeed = locomotionXML:getFloat("locomotion.speed#run", nil)
                         cache.animationUsesSkeleton = animationUsesSkeleton
+
+                        -- Engine animal XMLs (and most pack XMLs) ship per-species
+                        -- avoidance hints in `<avoidance ...>`. Carry them forward as
+                        -- defaults for the anticipatory steering layer; species
+                        -- config overrides win when set.
+                        cache.avoidance = {
+                            detectionDistance  = locomotionXML:getFloat("locomotion.avoidance#detectionDistance", nil),
+                            wallCircleRadius   = locomotionXML:getFloat("locomotion.avoidance#wallCircleRadius", nil),
+                            wallCircleDistance = locomotionXML:getFloat("locomotion.avoidance#wallCircleDistance", nil),
+                            maxWallForce       = locomotionXML:getFloat("locomotion.avoidance#maxWallForce", nil),
+                            maxAnimalForce     = locomotionXML:getFloat("locomotion.avoidance#maxAnimalForce", nil),
+                        }
 
                         self.cache[animalTypeIndex][visualAnimalIndex] = cache
 
@@ -1510,8 +1606,12 @@ function AnimalManager:getHusbandryInRange(node, animalTypeIndex, farmId, footRa
         if g_currentMission.controlledVehicle ~= nil then
             node = g_currentMission.controlledVehicle.rootNode
             inVehicle = true
-        else
+        elseif g_localPlayer ~= nil and g_localPlayer.rootNode ~= nil and g_localPlayer.rootNode ~= 0 then
             node = g_localPlayer.rootNode
+        else
+            -- Early load / disconnect / spectator: no controllable position
+            -- to query against. Bail rather than crash on g_localPlayer.rootNode.
+            return nil
         end
     end
     local x, _, z = getWorldTranslation(node)
@@ -1547,6 +1647,8 @@ function AnimalManager:returnAnimalToPlaceable(farmId, animalIndex, placeable)
     -- Hide the herded animal node before deletion so there is no visible snap
     -- from the herded position to the engine's NavMesh spawn point inside the husbandry.
     -- setAnimalPosition does not exist in FS25 so the NavMesh spawn position cannot be set.
+    -- (Tried setWorldTranslation on the engine animal's render node post-spawn — NavMesh
+    -- overrides it on the next tick, no improvement.)
     if animal.nodes ~= nil and animal.nodes.root ~= nil and animal.nodes.root ~= 0 then
         setVisibility(animal.nodes.root, false)
     end
@@ -2170,6 +2272,8 @@ function AnimalManager:refreshHerdingFootEvent()
 
     local oldFootId = self.herdingEventId
     local oldPickupId = self.pickupEventId
+    local oldUnloadId = self.unloadTrailerEventId
+    local oldDogId = (g_dogHerding ~= nil) and g_dogHerding.dogEventId or nil
 
     g_inputBinding:beginActionEventsModification(PlayerInputComponent.INPUT_CONTEXT_NAME)
 
@@ -2197,6 +2301,31 @@ function AnimalManager:refreshHerdingFootEvent()
         )
     end
 
+    -- Also refresh HerdingLiteUnload (LSHIFT+U) and HerdingLiteDog (LSHIFT+B).
+    -- Without this they go invisible after tab-through-vehicles or map-teleport
+    -- because their prompt display state is tied to a now-stale eventId.
+    local newUnloadId
+    if InputAction.HerdingLiteUnload ~= nil then
+        if oldUnloadId ~= nil and oldUnloadId ~= "" then
+            g_inputBinding:removeActionEvent(oldUnloadId)
+        end
+        _, newUnloadId = g_inputBinding:registerActionEvent(
+            InputAction.HerdingLiteUnload, AnimalManager, AnimalManager.onUnloadTrailer,
+            false, true, false, true, nil, false
+        )
+    end
+
+    local newDogId
+    if g_dogHerding ~= nil and InputAction.HerdingLiteDog ~= nil then
+        if oldDogId ~= nil and oldDogId ~= "" then
+            g_inputBinding:removeActionEvent(oldDogId)
+        end
+        _, newDogId = g_inputBinding:registerActionEvent(
+            InputAction.HerdingLiteDog, DogHerding, DogHerding.onToggleDogHerding,
+            false, true, false, true, nil, false
+        )
+    end
+
     g_inputBinding:endActionEventsModification()
 
     if newPickupId ~= nil and newPickupId ~= "" then
@@ -2207,6 +2336,25 @@ function AnimalManager:refreshHerdingFootEvent()
         -- pickup target is in range.
         g_inputBinding:setActionEventActive(newPickupId, false)
         g_inputBinding:setActionEventTextVisibility(newPickupId, false)
+    end
+
+    if newUnloadId ~= nil and newUnloadId ~= "" then
+        self.unloadTrailerEventId = newUnloadId
+        g_inputBinding:setActionEventTextPriority(newUnloadId, GS_PRIO_VERY_HIGH)
+        g_inputBinding:setActionEventText(newUnloadId, g_i18n:getText("ahl_unloadTrailer"))
+        -- Default off; AnimalManager:update re-evaluates each tick and
+        -- enables when a valid trailer + husbandry pair is detected.
+        g_inputBinding:setActionEventActive(newUnloadId, false)
+    end
+
+    if newDogId ~= nil and newDogId ~= "" then
+        g_dogHerding.dogEventId = newDogId
+        g_inputBinding:setActionEventTextPriority(newDogId, GS_PRIO_VERY_HIGH)
+        g_inputBinding:setActionEventText(newDogId, g_i18n:getText("ahl_sendDog", modName))
+        -- DogHerding's own update path manages active/visibility based on
+        -- doghouse proximity + herding eligibility.
+        g_inputBinding:setActionEventActive(newDogId, false)
+        g_inputBinding:setActionEventTextVisibility(newDogId, false)
     end
 
     if newEventId == nil or newEventId == "" then return end

@@ -30,6 +30,11 @@ function HerdingSyncEvent:readStream(streamId, connection)
     if not animalManager.isInitialised then return end
 
     local farmId = streamReadUIntN(streamId, FarmManager.FARM_ID_SEND_NUM_BITS)
+    -- Cross-farm race: a sync for a farm we haven't received the per-farm
+    -- HerdingEvent for yet (or one that was just force-stopped on the
+    -- server) would crash on .animals. Engine discards unread bytes when
+    -- readStream returns, same as the isInitialised guard above.
+    if animalManager.farms[farmId] == nil then return end
     local animals = animalManager.farms[farmId].animals
     local numAnimals = streamReadUInt8(streamId)
     local updatedIds = {}

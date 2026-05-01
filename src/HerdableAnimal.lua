@@ -4,6 +4,27 @@ HerdableAnimal.RUN_DISTANCE = 5
 HerdableAnimal.TURN_DISTANCE = 15
 HerdableAnimal.MAX_HERDING_RUN_SPEED = 3.0
 
+-- Sticky bucket-follow. Animals engage with the bucket within WALK_DISTANCE
+-- (20 m). Once engaged, they stay engaged out to BUCKET_SUSTAIN_DISTANCE
+-- (50 m) and the timer is refreshed continuously while inside the sustain
+-- zone (5 s grace per refresh inside sustain, full BUCKET_STICKY_MS = 12 s
+-- when re-entering the primary radius). Without this, an animal pushed to
+-- the back of a growing herd gets bumped past 20 m and instantly drops out
+-- of follow mode even though the bucket is right there. Animals only
+-- disengage if they leave the 50 m bubble entirely OR the timer expires.
+HerdableAnimal.BUCKET_SUSTAIN_DISTANCE = 50
+HerdableAnimal.BUCKET_STICKY_MS = 12000
+
+-- Catch-up grace: even after dropping out of the 50 m sustain, an animal that
+-- was bucket-engaged within the last BUCKET_CATCHUP_MS will steer toward the
+-- bucket-herd centroid (computed by AnimalManager from recently-engaged
+-- animals) so it rejoins via the flock instead of just idling. Bigger value =
+-- more determined stragglers. Only kicks in inside BUCKET_CATCHUP_DISTANCE
+-- of the centroid so a far-away animal doesn't pointlessly chase the herd
+-- across the whole map.
+HerdableAnimal.BUCKET_CATCHUP_MS = 60000
+HerdableAnimal.BUCKET_CATCHUP_DISTANCE = 200
+
 local herdableAnimal_mt = Class(HerdableAnimal)
 local modDirectory = g_currentModDirectory
 local modName = g_currentModName
@@ -94,12 +115,42 @@ function HerdableAnimal.new(placeable, rootNode, meshNode, shaderNode, skinNode,
 	g_currentMission:addMapHotspot(self.mapHotspot)
 	self.lastStuckTurn = 0
 
+	-- Anticipatory steering layer. Three async raycasts fire ahead each
+	-- ~10-tick steering cycle (alongside the surface raycast); their results
+	-- live here until the next firing replaces them. Each entry is
+	-- `{ hit = bool, dist = number }` after a hit, or stays nil when the ray
+	-- found nothing or hasn't returned yet. See applySteeringBias.
+	self.lookaheadResults = { left = nil, center = nil, right = nil }
+
+	-- Obstacle memory layer (anti-oscillation). Each entry: { x, z, expireAt }
+	-- Pushed when the stuck-escape mechanism trips; entries TTL via g_time.
+	-- Capped to 5 entries (FIFO) so old hits drop off as new ones arrive.
+	self.obstacleMemory = {}
+
+	-- Sticky bucket-follow timer. Refreshed to (g_time + BUCKET_STICKY_MS)
+	-- every tick the animal is inside WALK_DISTANCE of a bucket. While the
+	-- timer is in the future, animals in the 20–40 m sustain zone continue
+	-- to register the bucket as in-range. See the Stage A bucket loop.
+	self.bucketFollowUntil = 0
+
+	-- Catch-up timer: lives longer than bucketFollowUntil. While in catch-up,
+	-- the animal targets the herd centroid (from AnimalManager) instead of
+	-- giving up — so stragglers can rejoin via flock pull.
+	self.bucketCatchupUntil = 0
+
 	return self
 
 end
 
 
 function HerdableAnimal:delete()
+
+	-- Mark deleted so any in-flight async raycast callbacks (surface, lookahead)
+	-- can early-exit instead of writing to a half-deallocated table. Animals
+	-- can be deleted mid-tick by trailer auto-load while a raycast is still
+	-- pending — without this flag the callback would null-deref on
+	-- self.collisionController or self.position.
+	self.deleted = true
 
 	g_animalManager:deleteAnimalCollisionNode(self.collisionController.proxy)
 	g_currentMission:removeMapHotspot(self.mapHotspot)
@@ -584,6 +635,10 @@ function HerdableAnimal:update(dT)
 				-- Choose escape direction once at the start of each escape attempt
 				if not self.stuckEscaping then
 					self.stuckEscaping = true
+					-- Remember where this obstacle is so the steering bias
+					-- repels us if our flee / cohesion vector tries to push us
+					-- back into the same spot after we've turned away.
+					self:rememberObstacle()
 					if self.insideHusbandryPos == nil then
 						-- Outside husbandry: prefer the side with no lateral collision
 						local canLeft  = self.collisionController:getCanTurnLeft()
@@ -632,7 +687,16 @@ function HerdableAnimal:update(dT)
 
 			local distance
 
-			if self.herdingTarget.distance < walkDist and not (self.herdingTarget.followingBucket and self.herdingTarget.distance < runDist / 2) then
+			-- Walk-vs-idle threshold. Non-bucket targets use cfg.walkDistance
+			-- (~16 m for cow) — beyond that, the threat / cohesion target is
+			-- too far to bother walking to. But bucket-follow needs a much
+			-- larger range so catch-up stragglers can run from 50-100+ m
+			-- toward the herd centroid; otherwise the distance >= walkDist
+			-- check forces them idle and the catch-up does nothing.
+			local isFollowingBucket = self.herdingTarget.followingBucket
+			local walkThreshold = isFollowingBucket and HerdableAnimal.BUCKET_CATCHUP_DISTANCE or walkDist
+
+			if self.herdingTarget.distance < walkThreshold and not (isFollowingBucket and self.herdingTarget.distance < runDist / 2) then
 
 				distance = self.herdingTarget.distance
 				isWalkingFromPlayer = true
@@ -946,6 +1010,11 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 	local cfg = self.speciesCfg or AnimalSpeciesConfig.DEFAULT
 	dtSec = dtSec or 0
 
+	-- Refresh the ahead-of-motion lookahead probe at the same cadence as the
+	-- steering decisions (every ~10 ticks). The async raycasts populate
+	-- self.lookaheadResults; applySteeringBias reads them on subsequent ticks.
+	self:fireLookaheadRays()
+
 	-- STAGE A: Sense threats and bucket
 	local hasBucketInRange = false
 	local bucketX, bucketZ, bucketNearestDist
@@ -972,7 +1041,35 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 
 		if isBucket then
 
-			if distSq <= HerdableAnimal.WALK_DISTANCE * HerdableAnimal.WALK_DISTANCE then
+			-- Two-zone bucket detection.
+			--   Primary (WALK_DISTANCE = 20 m): engages and FULL-refreshes the
+			--   sticky timer (now + STICKY_MS).
+			--   Sustain  (BUCKET_SUSTAIN_DISTANCE = 50 m): keeps animals
+			--   engaged AND refreshes the timer to a shorter grace (5 s) — so
+			--   an animal pushed to the back of a big herd doesn't time out
+			--   as long as it stays anywhere inside 50 m of the bucket. Only
+			--   leaving the 50 m bubble entirely lets the timer expire.
+			-- Outside both zones: doesn't register at all.
+			local primary = HerdableAnimal.WALK_DISTANCE * HerdableAnimal.WALK_DISTANCE
+			local sustain = HerdableAnimal.BUCKET_SUSTAIN_DISTANCE * HerdableAnimal.BUCKET_SUSTAIN_DISTANCE
+			local now = g_time or 0
+			local SUSTAIN_REFRESH_MS = 5000
+			local register = false
+
+			if distSq <= primary then
+				register = true
+				self.bucketFollowUntil = now + HerdableAnimal.BUCKET_STICKY_MS
+				self.bucketCatchupUntil = now + HerdableAnimal.BUCKET_CATCHUP_MS
+			elseif distSq <= sustain and now < (self.bucketFollowUntil or 0) then
+				register = true
+				-- Keep the timer fresh while we're still inside 50 m so the
+				-- animal doesn't drop out of follow just because it's stuck
+				-- behind other cows for several seconds.
+				self.bucketFollowUntil = math.max(self.bucketFollowUntil, now + SUSTAIN_REFRESH_MS)
+				self.bucketCatchupUntil = math.max(self.bucketCatchupUntil or 0, now + HerdableAnimal.BUCKET_CATCHUP_MS)
+			end
+
+			if register then
 				local dist = math.sqrt(distSq)
 				if not hasBucketInRange or dist < bucketNearestDist then
 					bucketNearestDist = dist
@@ -1038,6 +1135,44 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 
 	end
 
+	-- CATCH-UP fallback: nothing in the player loop registered as a bucket
+	-- (animal is past the 50 m sustain). If the catch-up timer is still
+	-- alive, pick a target in priority order:
+	--   1. The herd centroid (preferred — pulls animal toward where the
+	--      flock IS, which is on its way to the bucket already).
+	--   2. The bucket player position itself (fallback for total dispersal:
+	--      every animal fell behind so there's no centroid to use).
+	-- Either way, the bucket-follow code path then takes over and walks
+	-- the animal toward the chosen target. Outside BUCKET_CATCHUP_DISTANCE
+	-- the animal has genuinely lost the herd; normal calm-flock / graze
+	-- behaviour resumes.
+	if not hasBucketInRange and (g_time or 0) < (self.bucketCatchupUntil or 0) then
+		local cx, cz
+		if self.bucketHerdCentroid ~= nil then
+			cx, cz = self.bucketHerdCentroid.x, self.bucketHerdCentroid.z
+		else
+			-- No centroid — find any bucket player in the list and chase it
+			-- directly. Catches the case where the entire herd briefly fell
+			-- behind and even the catch-up centroid couldn't be computed.
+			for _, p in pairs(players) do
+				if p[3] then
+					cx, cz = p[1], p[2]
+					break
+				end
+			end
+		end
+		if cx ~= nil then
+			local cdx, cdz = x - cx, z - cz
+			local cdistSq = cdx * cdx + cdz * cdz
+			local catchupMax = HerdableAnimal.BUCKET_CATCHUP_DISTANCE
+			if cdistSq <= catchupMax * catchupMax then
+				hasBucketInRange = true
+				bucketNearestDist = math.sqrt(cdistSq)
+				bucketX, bucketZ = cx, cz
+			end
+		end
+	end
+
 	-- Remember nearest threat for next-frame approach-speed derivation
 	if nearest ~= nil then
 		self.lastNearestKey = nearest.key
@@ -1084,6 +1219,10 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 		end
 
 		local dirX, dirZ = MathUtil.vector2Normalize(bucketX - x, bucketZ - z)
+		-- Anticipatory steering: nudge the desired direction around any wall
+		-- between the animal and the bucket. The bias is small relative to the
+		-- normalised goal vector when the path is clear.
+		dirX, dirZ = self:applySteeringBias(dirX, dirZ)
 		local dy = MathUtil.getYRotationFromDirection(dirX, dirZ)
 
 		if state.isIdle and not self.startWalking and not (bucketNearestDist < HerdableAnimal.RUN_DISTANCE / 2) then
@@ -1319,6 +1458,10 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 			sx, sz = fleeX, fleeZ
 		end
 
+		-- Bend the flee vector around walls / remembered obstacles before
+		-- committing to a heading.
+		sx, sz = self:applySteeringBias(sx, sz)
+
 		local dy = math.atan2(sx, sz)
 		local dist = nearest.dist
 
@@ -1374,6 +1517,7 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 
 		local sx = cohX * cohW + aliX * aliW + sepX * sepW
 		local sz = cohZ * cohW + aliZ * aliW + sepZ * sepW
+		sx, sz = self:applySteeringBias(sx, sz)
 		local slen = math.sqrt(sx * sx + sz * sz)
 
 		if slen > 0.3 then
@@ -1412,6 +1556,7 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 	else
 		local sx = cohX * cohW + aliX * aliW + sepX * sepW
 		local sz = cohZ * cohW + aliZ * aliW + sepZ * sepW
+		sx, sz = self:applySteeringBias(sx, sz)
 		local slen = math.sqrt(sx * sx + sz * sz)
 
 		if slen > 0.1 then
@@ -1465,12 +1610,225 @@ end
 
 function HerdableAnimal:onSurfaceHeightRaycast(hitObjectId, x, y, z, distance, nx, ny, nz, subShapeIndex, shapeId, isLast)
 
+	-- Animal deleted between firing and callback — bail.
+	if self.deleted then return false end
+
 	-- Skip this animal's own physics proxy
 	if self.collisionController ~= nil and hitObjectId == self.collisionController.proxy then return end
 
 	-- First valid hit descending from above is the topmost walkable surface — store and stop
 	self.surfaceRaycastHitY = y
 	return false
+
+end
+
+
+-- Collision flag mask for the anticipatory steering rays. Same set as the
+-- front-collision probe in AnimalCollisionController (without ANIMAL — we
+-- don't want neighbour animals to register as walls; the boids separation
+-- force already handles inter-animal spacing).
+local LOOKAHEAD_FLAG = CollisionFlag.STATIC_OBJECT + CollisionFlag.DYNAMIC_OBJECT
+                     + CollisionFlag.VEHICLE + CollisionFlag.BUILDING
+
+
+-- Fire three async lookahead rays at -45°/0°/+45° relative to current heading.
+-- Called once per ~10-tick steering cycle from updateRelativeToPlayers, in step
+-- with the existing surface-raycast cadence. Results land in
+-- self.lookaheadResults via the per-side callbacks below; they're consumed by
+-- applySteeringBias on subsequent ticks.
+function HerdableAnimal:fireLookaheadRays()
+
+	local rootNode = self.nodes and self.nodes.root
+	if rootNode == nil or rootNode == 0 then return end
+
+	local cfg = self.speciesCfg
+	-- Default to species-config value; fall back to the locomotion XML's
+	-- detectionDistance (already loaded into AnimalManager's per-type cache as
+	-- cache.avoidance.detectionDistance). Species config wins because the
+	-- engine XML default of 4 m is too tight for cows / horses.
+	local detectionDist = cfg and cfg.lookaheadDist or nil
+	if detectionDist == nil and self.animalTypeIndex ~= nil and self.visualAnimalIndex ~= nil then
+		local cache = g_animalManager:getVisualAnimalFromCache(self.animalTypeIndex, self.visualAnimalIndex)
+		if cache ~= nil and cache.avoidance ~= nil then
+			detectionDist = cache.avoidance.detectionDistance
+		end
+	end
+	if detectionDist == nil or detectionDist <= 0 then return end
+
+	local angleDeg = (cfg and cfg.lookaheadAngleDeg) or 45
+	local angleRad = math.rad(angleDeg)
+
+	-- Origin: animal centre, just above ground so the rays don't graze the
+	-- terrain mesh. 0.3 m matches the engine's typical animal "head" height.
+	local ox, oy, oz = self.position.x, self.position.y + 0.3, self.position.z
+
+	-- Centre direction: animal's local +Z (forward).
+	local fx, fy, fz = localDirectionToWorld(rootNode, 0, 0, 1)
+
+	-- Side directions: rotate the forward vector around the world Y axis by
+	-- ±angleRad. This gives a stable horizontal fan even when the animal's
+	-- pitch isn't zero (e.g. on a slope).
+	local cosA, sinA = math.cos(angleRad), math.sin(angleRad)
+	local lx =  fx * cosA + fz * sinA
+	local lz = -fx * sinA + fz * cosA
+	local rx =  fx * cosA - fz * sinA
+	local rz =  fx * sinA + fz * cosA
+
+	-- Clear previous results — the callbacks repopulate any side that hits.
+	-- Sides that miss stay nil for this cycle (treated as "clear" downstream).
+	self.lookaheadResults.left   = nil
+	self.lookaheadResults.center = nil
+	self.lookaheadResults.right  = nil
+
+	raycastAllAsync(ox, oy, oz, lx, fy, lz, detectionDist, "onLookaheadRaycastLeft",   self, LOOKAHEAD_FLAG)
+	raycastAllAsync(ox, oy, oz, fx, fy, fz, detectionDist, "onLookaheadRaycastCenter", self, LOOKAHEAD_FLAG)
+	raycastAllAsync(ox, oy, oz, rx, fy, rz, detectionDist, "onLookaheadRaycastRight",  self, LOOKAHEAD_FLAG)
+
+end
+
+
+-- Per-side callbacks. We only care about the FIRST valid hit on each ray
+-- (closest obstacle in that direction); return false to short-circuit further
+-- callbacks for this raycast. We skip our own proxy and any node whose name
+-- contains "trigger" (matches the existing front-probe rule documented in
+-- project_gate_collision memory).
+local function _ahlLookaheadHitOk(self, hitObjectId)
+	if hitObjectId == nil or hitObjectId == 0 then return false end
+	if self.collisionController ~= nil and hitObjectId == self.collisionController.proxy then return false end
+	local ok, name = pcall(getName, hitObjectId)
+	if ok and type(name) == "string" and string.find(string.lower(name), "trigger") then return false end
+	return true
+end
+
+
+function HerdableAnimal:onLookaheadRaycastLeft(hitObjectId, x, y, z, distance)
+	if self.deleted then return false end
+	if self.lookaheadResults.left ~= nil then return false end
+	if not _ahlLookaheadHitOk(self, hitObjectId) then return true end
+	self.lookaheadResults.left = { hit = true, dist = distance }
+	return false
+end
+
+function HerdableAnimal:onLookaheadRaycastCenter(hitObjectId, x, y, z, distance)
+	if self.deleted then return false end
+	if self.lookaheadResults.center ~= nil then return false end
+	if not _ahlLookaheadHitOk(self, hitObjectId) then return true end
+	self.lookaheadResults.center = { hit = true, dist = distance }
+	return false
+end
+
+function HerdableAnimal:onLookaheadRaycastRight(hitObjectId, x, y, z, distance)
+	if self.deleted then return false end
+	if self.lookaheadResults.right ~= nil then return false end
+	if not _ahlLookaheadHitOk(self, hitObjectId) then return true end
+	self.lookaheadResults.right = { hit = true, dist = distance }
+	return false
+end
+
+
+-- Compose a steering-bias vector from:
+--   * Layer 1 — most recent lookahead probe results (anticipate walls)
+--   * Layer 2 — live obstacle-memory queue (anti-oscillation)
+-- Caller blends with whatever (sx, sz) the flee/flock/bucket logic produced
+-- and feeds the result into atan2 → targetDirY:
+--     sx, sz = self:applySteeringBias(sx, sz)
+function HerdableAnimal:applySteeringBias(sx, sz)
+
+	local cfg = self.speciesCfg
+	if cfg == nil then return sx, sz end
+
+	-- ---------- Layer 1: lookahead probe bias ----------
+	local centerHit = self.lookaheadResults.center
+	if centerHit ~= nil then
+		local lookahead = cfg.lookaheadDist or 4.0
+		local prox = math.max(0, math.min(1, (lookahead - centerHit.dist) / lookahead))
+		local strength = (cfg.wallBiasStrength or 0.6) * prox
+
+		-- Pick the clearer flank. nil result = no hit = clear.
+		local leftClear  = self.lookaheadResults.left  == nil
+		local rightClear = self.lookaheadResults.right == nil
+		local biasSign
+		if leftClear and not rightClear then
+			biasSign = -1
+		elseif rightClear and not leftClear then
+			biasSign = 1
+		elseif leftClear and rightClear then
+			-- Both flanks clear — keep whichever flank we last picked to avoid
+			-- frame-to-frame flapping at equally-clear options.
+			biasSign = (self.lastStuckTurn or 1) >= 0 and 1 or -1
+		else
+			-- Both flanks blocked — prefer whichever side has more room.
+			local lDist = self.lookaheadResults.left.dist or 0
+			local rDist = self.lookaheadResults.right.dist or 0
+			biasSign = (rDist >= lDist) and 1 or -1
+		end
+
+		-- Bias perpendicular to forward in world space (local +X = right).
+		local rootNode = self.nodes and self.nodes.root
+		if rootNode ~= nil and rootNode ~= 0 then
+			local px, _, pz = localDirectionToWorld(rootNode, biasSign, 0, 0)
+			sx = sx + px * strength
+			sz = sz + pz * strength
+		end
+	end
+
+	-- ---------- Layer 2: obstacle-memory repulsion ----------
+	-- Skip the memory layer while bucket-following. The bucket is a committed
+	-- goal — at narrow passages like gates, animals NEED to retry the same
+	-- spot they just escaped from. Memory repulsion was causing animals to
+	-- bounce sideways out of gate queues. Layer 1 (lookahead) still applies.
+	local skipMemory = self.herdingTarget ~= nil and self.herdingTarget.followingBucket
+	local mem = self.obstacleMemory
+	if not skipMemory and mem ~= nil and #mem > 0 then
+		local now = g_time or 0
+		local memRadius = cfg.obstacleMemoryRadius or 4.0
+		local memWeight = cfg.obstacleMemoryWeight or 0.8
+		local i = 1
+		while i <= #mem do
+			local entry = mem[i]
+			if entry == nil or now > (entry.expireAt or 0) then
+				table.remove(mem, i)
+			else
+				local dx = self.position.x - entry.x
+				local dz = self.position.z - entry.z
+				local d2 = dx * dx + dz * dz
+				if d2 < memRadius * memRadius and d2 > 0.001 then
+					local d = math.sqrt(d2)
+					local falloff = 1 - (d / memRadius)
+					local s = memWeight * falloff
+					sx = sx + (dx / d) * s
+					sz = sz + (dz / d) * s
+				end
+				i = i + 1
+			end
+		end
+	end
+
+	return sx, sz
+
+end
+
+
+-- Push an obstacle position into the per-animal memory queue. Called from the
+-- stuck-escape entry block. Position is the animal's current pose extended
+-- ~0.5 m forward — best estimate of where the actual wall is.
+function HerdableAnimal:rememberObstacle()
+
+	local cfg = self.speciesCfg
+	local ttl = (cfg and cfg.obstacleMemoryMs) or 5000
+	local rootNode = self.nodes and self.nodes.root
+	if rootNode == nil or rootNode == 0 then return end
+
+	local fx, _, fz = localDirectionToWorld(rootNode, 0, 0, 1)
+	local entry = {
+		x = self.position.x + fx * 0.5,
+		z = self.position.z + fz * 0.5,
+		expireAt = (g_time or 0) + ttl,
+	}
+
+	local mem = self.obstacleMemory
+	mem[#mem + 1] = entry
+	while #mem > 5 do table.remove(mem, 1) end
 
 end
 

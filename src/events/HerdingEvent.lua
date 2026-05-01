@@ -153,6 +153,16 @@ function HerdingEvent:writeStream(streamId, connection)
     else
 
         local farm = animalManager.farms[self.farmId]
+        if farm == nil then
+            -- Farm record was cleared between event scheduling and dispatch
+            -- (animals all returned, herding stopped, etc.). Write a 0-animal
+            -- frame so readers don't desync; reader treats farmId+0 animals
+            -- as a tear-down signal.
+            streamWriteUIntN(streamId, self.farmId, FarmManager.FARM_ID_SEND_NUM_BITS)
+            streamWriteUInt8(streamId, 0)
+            streamWriteUInt8(streamId, 0)
+            return
+        end
         streamWriteUIntN(streamId, self.farmId, FarmManager.FARM_ID_SEND_NUM_BITS)
         streamWriteUInt8(streamId, farm.animalTypeIndex)
         streamWriteUInt8(streamId, #farm.animals)

@@ -18,6 +18,14 @@ function Animal:getCanBePickedUp()
 	if animalTypeIndex == AnimalType.PIG then return age < 3 end
 	if animalTypeIndex == AnimalType.SHEEP then return age < 3 end
 
-	return true
+	-- Map-bridge species (RABBIT from Witcombe; GOOSE / CAT / ALPACA / QUAIL
+	-- from Hof Bergmann; DUCK / DUCKWILD / etc. from other map mods) are
+	-- intentionally NOT pickup-able. The herding mod only handles the five
+	-- base FS25 animal types for the carry-in-hand interaction; other
+	-- species can still be HERDED (LSHIFT+N) but not picked up by hand.
+	-- This avoids cache-miss crashes on visual indices the engine animal
+	-- system doesn't ship by default and keeps the pickup UX scoped to the
+	-- animals that have full carry-state support.
+	return false
 
 end
