@@ -464,6 +464,24 @@ function AnimalManager:update(dT)
                 animal.bucketHerdCentroid = farm.bucketHerdCentroid
                 animal:updateRelativeToPlayers(animalPlayers, updateRelativeToPlayers, dtSec, neighbors)
                 animal:update(dT)
+                -- Per-animal vocalisation. AnimalSounds.tick handles the
+                -- per-id timer, distance-cull, sample lazy-load and
+                -- playback. Engine plays in-pen yells via the husbandry
+                -- placeable; we cover yells while the animal is herded
+                -- (i.e. owned by AHL), so no double-up.
+                if AnimalSounds ~= nil then
+                    AnimalSounds.tick(animal, #farm.animals, g_time)
+                    -- Eat-pulse — fires the species eat-loop sample at
+                    -- ~2s intervals while CalmBehaviorCycler is in a
+                    -- graze/eat/chew state. No-op when herded (cycler
+                    -- inactive) or chicken (no eat sound configured).
+                    AnimalSounds.eatTick(animal, g_time)
+                    -- Footstep pulse — fires species step samples at
+                    -- per-species cadence while state.isWalking or
+                    -- state.isRunning. Skipped during pure in-place
+                    -- turns and when not translating.
+                    AnimalSounds.stepTick(animal, g_time)
+                end
             end
 
         end

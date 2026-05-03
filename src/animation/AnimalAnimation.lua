@@ -210,14 +210,14 @@ function AnimalAnimation:update(dT, isWalkingFromPlayer)
 
 		elseif state.isIdle then
 
-			-- Pick graze clip when self.animal.isGrazing is true and the
-			-- species has a graze state in its XML (cow/sheep/pig/goat have
-			-- it; chickens use "eat" variants; species without either fall
-			-- back to idle). The animal stays put and visually feeds.
+			-- Calm-behavior cycler picks the desired idle-branch state per
+			-- animal: graze / eat / chew / idle, rotated on a per-animal
+			-- timer (CalmBehaviorCycler). Falls back to "idle" if the
+			-- selected state isn't in this species' cache.
 			local desiredId = "idle"
-			if self.animal ~= nil and self.animal.isGrazing
-			   and self.cache.states ~= nil and self.cache.states["graze"] ~= nil then
-				desiredId = "graze"
+			local cb = self.animal and self.animal.calmBehavior
+			if cb ~= nil and self.cache.states ~= nil and self.cache.states[cb.id] ~= nil then
+				desiredId = cb.id
 			end
 
 			-- Smooth exit from a turn clip (or a mismatched idle state like
@@ -234,7 +234,11 @@ function AnimalAnimation:update(dT, isWalkingFromPlayer)
 			end
 			if otherTrack ~= nil then
 				local fromAnimId = otherTrack.animationId or otherTrack.id .. "1"
-				local toAnimId = (desiredId == "graze") and "graze1" or "idle1"
+				-- Default to "<state>1" — startTransition falls back to
+				-- getRandomAnimation if the named clip isn't in the cache,
+				-- so unusual variant names (eat = feedSource etc.) still
+				-- resolve correctly.
+				local toAnimId = desiredId .. "1"
 				self:startTransition(otherTrack.id, desiredId, fromAnimId, toAnimId)
 				state.lastDirY = state.dirY
 				return
@@ -424,7 +428,16 @@ function AnimalAnimation:getRandomAnimation(id)
 
 	for _, animation in pairs(state) do numAnimations = numAnimations + 1 end
 
-	local randomAnimation = math.random(1, numAnimations)
+	-- Per-animal deterministic variant pick. The previous math.random call
+	-- meant two animals installing the same state on the same tick both got
+	-- the same variant index — visible synchronisation on the few states
+	-- with multiple variants (pig idle1/idle2, horse, chicken). Hash from
+	-- (animal id, 5-second time bucket) so animals desync from each other
+	-- AND each animal still varies its variant choice over time.
+	local animId = (self.animal and self.animal.id) or 0
+	local timeBucket = math.floor((g_time or 0) / 5000)
+	local h = (animId * 2654435761 + timeBucket * 374761393) % 2147483647
+	local randomAnimation = (h % numAnimations) + 1
 
 	local i = 1
 
@@ -683,45 +696,27 @@ function AnimalAnimation:getMovementSpeed()
 	local speedModifiers = self.speedModifiers
 	local overrides = self.stateSpeedOverrides
 
+	-- Single accumulation loop. During a transition, both transition.to and
+	-- transition.from track sets contribute weighted by their blend; outside
+	-- a transition, only self.tracks is active. The body of each iteration
+	-- is identical, so factor into a small helper local instead of repeating
+	-- it across two/three loops.
+	local function accumulate(trackSet)
+		for _, track in pairs(trackSet) do
+			if track.enabled then
+				local modId = track.speedId or track.id
+				local trackSpeed = (overrides and overrides[modId]) or track.speed
+				speed = speed + trackSpeed * track.blend * (speedModifiers[modId] or 1)
+				numTracks = numTracks + 1
+			end
+		end
+	end
+
 	if self.transition == nil then
-
-		for _, track in pairs(self.tracks) do
-
-			if not track.enabled then continue end
-
-			local modId = track.speedId or track.id
-			local trackSpeed = (overrides and overrides[modId]) or track.speed
-			speed = speed + trackSpeed * track.blend * (speedModifiers[modId] or 1)
-			numTracks = numTracks + 1
-
-		end
-
+		accumulate(self.tracks)
 	else
-
-		local transition = self.transition
-
-		for _, track in pairs(transition.to) do
-
-			if not track.enabled then continue end
-
-			local modId = track.speedId or track.id
-			local trackSpeed = (overrides and overrides[modId]) or track.speed
-			speed = speed + trackSpeed * track.blend * (speedModifiers[modId] or 1)
-			numTracks = numTracks + 1
-
-		end
-
-		for _, track in pairs(transition.from) do
-
-			if not track.enabled then continue end
-
-			local modId = track.speedId or track.id
-			local trackSpeed = (overrides and overrides[modId]) or track.speed
-			speed = speed + trackSpeed * track.blend * (speedModifiers[modId] or 1)
-			numTracks = numTracks + 1
-
-		end
-
+		accumulate(self.transition.to)
+		accumulate(self.transition.from)
 	end
 
 	if numTracks == 0 then return 0 end

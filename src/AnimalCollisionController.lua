@@ -22,6 +22,25 @@ local function classifyNode(node)
 end
 
 
+-- Per-node trigger cache. The original gate-trigger filter ran
+-- string.lower(getName(node)) and string.find on every overlap hit, every
+-- probe (front/left/right/groundLow), every animal, every frame — non-trivial
+-- string churn. The set of distinct trigger nodes encountered in a session
+-- is small (a few dozen gates, husbandry triggers, etc.) so a per-node bool
+-- cache is bounded and avoids the repeated string ops. Node IDs are integer
+-- handles; no GC pressure from keys.
+local triggerNodeCache = {}
+
+local function isTriggerNode(node)
+	local cached = triggerNodeCache[node]
+	if cached ~= nil then return cached end
+	local name = getName(node)
+	local result = name ~= nil and string.find(string.lower(name), "trigger") ~= nil
+	triggerNodeCache[node] = result
+	return result
+end
+
+
 -- Broad discovery sweep: catches all physics objects near the animal regardless of their group bits.
 -- Used to find objects the normal probes miss (group not in collisionFlag).
 local DISCOVERY_SWEEP_FLAG = 0x7FFFFFFF
@@ -127,8 +146,32 @@ function AnimalCollisionController:onOverlapFrontConvexCallback(node)
 
 	if node ~= self.proxy and g_animalManager.collisionNodes[node] == nil then
 
-		local name = getName(node)
-		if name ~= nil and string.find(string.lower(name), "trigger") then return end
+		if isTriggerNode(node) then return end
+
+		-- Player-specific detection: walk up the parent chain to the local
+		-- player's root. When the front probe overlaps the player, route
+		-- it to a separate flag instead of hasFrontCollision. The regular
+		-- collision branch in HerdableAnimal toggles isIdle each tick the
+		-- overlap flips state, producing visible vibration as the player
+		-- shuffles around the animal. The pre-translation skip in
+		-- updateRelativeToPlayers reads this flag instead and freezes the
+		-- position write before it can move INTO the player.
+		local playerRoot = g_localPlayer ~= nil and g_localPlayer.rootNode or nil
+		if playerRoot ~= nil and playerRoot ~= 0 then
+			local n = node
+			for _ = 1, 6 do
+				if n == playerRoot then
+					self.hasFrontPlayerCollision = true
+					if g_animalManager.collisionDebugEnabled and self.debugHitInfo.front == nil then
+						self.debugHitInfo.front = { type = "Player", name = "g_localPlayer.rootNode" }
+					end
+					return true
+				end
+				local p = getParent(n)
+				if p == nil or p == 0 then break end
+				n = p
+			end
+		end
 
 		self.hasFrontCollision = true
 
@@ -148,8 +191,7 @@ function AnimalCollisionController:onOverlapLeftConvexCallback(node)
 
 	if node ~= self.proxy and g_animalManager.collisionNodes[node] == nil then
 
-		local name = getName(node)
-		if name ~= nil and string.find(string.lower(name), "trigger") then return end
+		if isTriggerNode(node) then return end
 
 		self.hasLeftCollision = true
 
@@ -169,8 +211,7 @@ function AnimalCollisionController:onOverlapRightConvexCallback(node)
 
 	if node ~= self.proxy and g_animalManager.collisionNodes[node] == nil then
 
-		local name = getName(node)
-		if name ~= nil and string.find(string.lower(name), "trigger") then return end
+		if isTriggerNode(node) then return end
 
 		self.hasRightCollision = true
 
@@ -273,6 +314,10 @@ end
 function AnimalCollisionController:updateCollisions(updateTurningCollisions)
 
 	self.hasFrontCollision, self.hasGroundLowCollision, self.hasGroundHighCollision = false, false, false
+	-- Reset player-specific front-collision flag too. Read by HerdableAnimal
+	-- the next frame to skip the position update before it pushes INTO the
+	-- player (the toggle that produces visible vibration).
+	self.hasFrontPlayerCollision = false
 
 	if g_animalManager.collisionDebugEnabled then
 		self.debugHitInfo = { front = nil, left = nil, right = nil, groundLow = nil }
@@ -292,6 +337,13 @@ function AnimalCollisionController:updateCollisions(updateTurningCollisions)
 	end
 
 	--if self.hasGroundLowCollision then overlapConvex(self.groundCollisionHigh, "onOverlapGroundHighConvexCallback", self, collisionFlag) end
+
+end
+
+
+function AnimalCollisionController:getHasFrontPlayerCollision()
+
+	return self.hasFrontPlayerCollision == true
 
 end
 

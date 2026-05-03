@@ -68,6 +68,27 @@ function HerdableAnimal.new(placeable, rootNode, meshNode, shaderNode, skinNode,
 	self.grazeTarget = nil
 	self.nextGrazeReselectTick = 0
 	self.isGrazing = false
+	-- Per-animal calm behavior cycler state. Populated by CalmBehaviorCycler
+	-- when arousal drops below calmThreshold; cleared whenever a threat
+	-- re-engages. Shape: { id = "graze"|"eat"|"chew"|"idle", expiresAtMs, cycle }.
+	self.calmBehavior = nil
+	-- Per-animal vocalisation timer. AnimalSounds.tick reads this and
+	-- schedules the next yell (cow moo / sheep baa / etc.) at a per-id
+	-- random interval scaled by herd size. 0 = "schedule on first tick".
+	self.nextYellAtMs = 0
+	self._yellCycle = 0
+	-- Per-animal eat-pulse timer. AnimalSounds.eatTick fires the species
+	-- eat-loop sample at ~2s intervals while calmBehavior.id is in
+	-- {graze, eat, chew}. nil = "not currently eating" (or hasn't started
+	-- yet); non-nil = next pulse fire time in g_time ms.
+	self._nextEatPulseAtMs = nil
+	self._eatCycle = 0
+	-- Per-animal footstep-pulse timer. AnimalSounds.stepTick fires the
+	-- species step samples at species-cadence intervals (~250-600ms walk,
+	-- ~150-320ms run) while state.isWalking or state.isRunning, skipping
+	-- pure in-place turns. nil = "not currently moving".
+	self._nextStepAtMs = nil
+	self._stepCycle = 0
 	self.lastNearestKey = nil
 	self.lastNearestDist = nil
 	self.speciesCfg = nil
@@ -374,7 +395,15 @@ function HerdableAnimal:processPlaceableDetection(placeables)
 
 				self.placeableLeaveTimer = self.placeableLeaveTimer + 1
 
-				if self.placeableLeaveTimer >= 10 then self.placeable = nil end
+				-- Originally cleared self.placeable after 10 ticks outside,
+				-- which made the next entry into the original husbandry
+				-- look like a different placeable to the elseif branch
+				-- below — auto-absorbing the animal back. Removing the
+				-- clear keeps the original reference for the whole
+				-- herding session, so only the explicit "Stop Herding"
+				-- action can re-cluster the animal into its original
+				-- husbandry. Auto-absorb into OTHER husbandries still
+				-- works normally.
 
 			else
 
@@ -440,7 +469,14 @@ end
 
 function HerdableAnimal:validateSpeed(animalTypeIndex)
 
-	self.speciesCfg = AnimalSpeciesConfig.get(animalTypeIndex)
+	-- Per-individual personality jitter: each animal gets ±10–25% offsets
+	-- on user-visible behavior fields (startle / decay / gaze / perception)
+	-- derived deterministically from self.id, so the herd reacts in a
+	-- staggered cascade instead of a synchronized wave. Idempotent — safe
+	-- to call again after self.id is assigned (e.g. after readStream on
+	-- the client path).
+	local baseCfg = AnimalSpeciesConfig.get(animalTypeIndex)
+	self.speciesCfg = PersonalityJitter.apply(baseCfg, self.id)
 	self.animalTypeIndex = animalTypeIndex
 
 end
@@ -768,14 +804,60 @@ function HerdableAnimal:update(dT)
 					end
 				end
 
+				-- Player block: if last frame's front probe overlapped the
+				-- local player, skip this frame's position write before it
+				-- pushes INTO them. The original full-collision branch in
+				-- update() runs AFTER position has already advanced, so the
+				-- animal would translate forward, then update() forces idle,
+				-- then next frame translates again — visible vibration as
+				-- the player shuffles around the animal. Force idle here
+				-- too so the walk animation doesn't moonwalk in place.
+				-- Declared outside the `if distance > 0` block so the
+				-- isMoving override below can read it.
+				local blockedByPlayer = self.collisionController ~= nil
+					and self.collisionController.getHasFrontPlayerCollision ~= nil
+					and self.collisionController:getHasFrontPlayerCollision()
+
 				if distance > 0 then
 
-					self.position.x = x + stepX * dT * 0.001 * self.speed * speedScale
-					self.position.z = z + stepZ * dT * 0.001 * self.speed * speedScale
+					if blockedByPlayer then
+						-- Skip the position write whenever the player is in
+						-- front. But ONLY force the animation to idle if
+						-- we're not mid-stuckEscape — otherwise the
+						-- escape-turn animation gets cancelled and the
+						-- escape stalls until the player moves.
+						if not self.stuckEscaping then
+							state.isIdle = true
+							state.isWalking = false
+							state.isRunning = false
+						end
+					else
+						-- Cap effective per-frame translation so the body can't outrun
+						-- the animation's max playback rate (1.3× clamp at line 1010).
+						-- During a fast run→walk transition, targetSpeed drops faster
+						-- than speedAccelMps2 (2.0 m/s² for cow) can ramp self.speed
+						-- down. Without this cap, the playback ratio gets clamped to
+						-- 1.3 (legs at most 1.3× speed) while the body keeps moving
+						-- at the full self.speed — body covers more ground per frame
+						-- than the stride, visible as bunny-hop / foot-skating.
+						local effSpeed = self.speed * speedScale
+						local targetSp = self.animation:getMovementSpeed()
+						if targetSp > 0.05 and effSpeed > targetSp * 1.3 then
+							effSpeed = targetSp * 1.3
+						end
+
+						self.position.x = x + stepX * dT * 0.001 * effSpeed
+						self.position.z = z + stepZ * dT * 0.001 * effSpeed
+					end
 
 				end
 
-				local isMoving = stepX ~= 0 or stepZ ~= 0
+				-- isMoving uses the heading vector (almost always non-zero), so
+				-- when blockedByPlayer skipped the position update above we must
+				-- still propagate "not actually moving" here — otherwise the
+				-- walk animation reasserts itself one line later and the
+				-- animal walks-in-place against the player's body.
+				local isMoving = (stepX ~= 0 or stepZ ~= 0) and not blockedByPlayer
 
 				state.isWalking = isMoving
 				state.isRunning = false
@@ -1018,12 +1100,19 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 	-- STAGE A: Sense threats and bucket
 	local hasBucketInRange = false
 	local bucketX, bucketZ, bucketNearestDist
-	local nearest = nil
-	local nearestSq = math.huge
-	-- "Real" threat tracker — excludes synthetic guide influencers (isGuide).
-	-- Used for arousal buildup in Stage B so a non-scary directional pull
-	-- doesn't ratchet arousal to 1.0 just by being nearby.
-	local nearestThreat = nil
+	-- Reuse persistent scratch tables for nearest / nearestThreat so the
+	-- inner player loop doesn't allocate a fresh table every time it
+	-- discovers a closer candidate (was up to N allocations per animal
+	-- per tick — ~150/frame for a 30-cow herd with 5 nearby influencers).
+	-- The local `nearest` / `nearestThreat` pointers stay nil until a
+	-- candidate is found, then get pointed at the scratch table.
+	self._nearestScratch  = self._nearestScratch  or {}
+	self._threatScratch   = self._threatScratch   or {}
+	local nearestScratch  = self._nearestScratch
+	local threatScratch   = self._threatScratch
+	local nearest         = nil
+	local nearestThreat   = nil
+	local nearestSq       = math.huge
 	local nearestThreatSq = math.huge
 	local fleeAccX, fleeAccZ = 0, 0
 	local fleeWeight = 0
@@ -1101,11 +1190,17 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 					if self.lastNearestKey == key and self.lastNearestDist ~= nil and dtSec > 0 then
 						approachSpeed = (self.lastNearestDist - d) / dtSec
 					end
-					nearest = {
-						px = px, pz = pz, dx = dx, dz = dz,
-						dist = d, distSq = distSq, key = key,
-						isVehicle = isVehicle, isGuide = isGuide, approachSpeed = approachSpeed
-					}
+					nearestScratch.px = px
+					nearestScratch.pz = pz
+					nearestScratch.dx = dx
+					nearestScratch.dz = dz
+					nearestScratch.dist = d
+					nearestScratch.distSq = distSq
+					nearestScratch.key = key
+					nearestScratch.isVehicle = isVehicle
+					nearestScratch.isGuide = isGuide
+					nearestScratch.approachSpeed = approachSpeed
+					nearest = nearestScratch
 				end
 
 				-- Track the nearest non-guide threat separately so arousal
@@ -1121,12 +1216,17 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 					if self.lastNearestThreatKey == key and self.lastNearestThreatDist ~= nil and dtSec > 0 then
 						approachSpeed = (self.lastNearestThreatDist - d) / dtSec
 					end
-					nearestThreat = {
-						px = px, pz = pz, dx = dx, dz = dz,
-						dist = d, distSq = distSq, key = key,
-						isVehicle = isVehicle, threatScale = threatScale,
-						approachSpeed = approachSpeed
-					}
+					threatScratch.px = px
+					threatScratch.pz = pz
+					threatScratch.dx = dx
+					threatScratch.dz = dz
+					threatScratch.dist = d
+					threatScratch.distSq = distSq
+					threatScratch.key = key
+					threatScratch.isVehicle = isVehicle
+					threatScratch.threatScale = threatScale
+					threatScratch.approachSpeed = approachSpeed
+					nearestThreat = threatScratch
 				end
 
 			end
@@ -1202,7 +1302,13 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 		-- (tiny player movements produce large angle swings), and
 		-- getHasPlayerInVicinity() flickers at the collision probe boundary
 		-- — previously produced visible "vibration" on the animal.
-		local BUCKET_ARRIVED_DIST = 1.5
+		-- Arrival deadzone. 1.5 m was too tight (collision proxy stopped
+		-- translation before this fired), 3.0 m was too wide (animal could
+		-- "arrive" while standing in another husbandry's overlapping
+		-- delivery area, triggering wrong-husbandry auto-absorb on the
+		-- same tick). 2.2 m sits between the player-collision boundary
+		-- (~1-1.2 m) and most husbandry edge widths (~2.5 m+).
+		local BUCKET_ARRIVED_DIST = 2.2
 		if bucketNearestDist < BUCKET_ARRIVED_DIST then
 			state.isTurning = false
 			state.targetDirY = self.rotation.y
@@ -1237,8 +1343,17 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 			x = x, z = z, ax = bucketX, az = bucketZ
 		}
 
-		if bucketNearestDist > HerdableAnimal.TURN_DISTANCE or
-		   (self.rotation.y <= dy + 0.05 and self.rotation.y >= dy - 0.05) or
+		-- Turn gate for bucket-follow. The previous gate had
+		-- `bucketNearestDist > TURN_DISTANCE` (15 m) as an early-exit, which
+		-- created a 15–20 m band where startWalking flipped on but the
+		-- heading stayed locked to the animal's current facing. If the
+		-- animal happened to be facing away from the bucket it would walk
+		-- (or run, past RUN_DISTANCE=5 m) directly away, often clearing the
+		-- 50 m sustain bubble before any turn could engage. Bucket IS the
+		-- destination, so always turn toward it — the other two conditions
+		-- (already aligned, player on top) are the legitimate "don't chatter
+		-- the rotation" cases and stay.
+		if (self.rotation.y <= dy + 0.05 and self.rotation.y >= dy - 0.05) or
 		   self.collisionController:getHasPlayerInVicinity() then
 			state.isTurning = false
 			state.targetDirY = self.rotation.y
@@ -1410,6 +1525,31 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 				aliZ = avgRz / lenA
 				aliW = cfg.alignmentWeight * (0.3 + 0.7 * self.arousal)
 			end
+
+			-- Coalescing flee: when fleeing, blend the per-animal flee vector
+			-- with a "toward herd centroid" component so scared animals flee as
+			-- a coherent group instead of a starburst. Real prey species
+			-- tighten under threat — that's their survival strategy. Only
+			-- applies if the animal is actually fleeing (fleeW > 0) and there
+			-- IS somewhere to coalesce toward (centroid > 0.5 m away — inside
+			-- that they're already on top of the centroid). Replaces the
+			-- normalised flee vector with its renormalised sum, so the magnitude
+			-- still represents a unit direction; only the direction shifts.
+			if fleeW > 0 then
+				local toCx, toCz = (cx / count) - x, (cz / count) - z
+				local lenTC = math.sqrt(toCx * toCx + toCz * toCz)
+				if lenTC > 0.5 then
+					local COALESCE_WEIGHT = 0.4
+					toCx, toCz = toCx / lenTC, toCz / lenTC
+					local nx = fleeX + toCx * COALESCE_WEIGHT
+					local nz = fleeZ + toCz * COALESCE_WEIGHT
+					local nlen = math.sqrt(nx * nx + nz * nz)
+					if nlen > 0.0001 then
+						fleeX = nx / nlen
+						fleeZ = nz / nlen
+					end
+				end
+			end
 		end
 	end
 
@@ -1422,8 +1562,22 @@ function HerdableAnimal:updateRelativeToPlayers(players, updateTerrain, dtSec, n
 	-- Grazing is suppressed during dog herding so calm animals don't drift
 	-- back to the feed area when the dog is out of range.
 	if self.arousal < cfg.calmThreshold and nearest == nil and not self.dogHerdingActive then
-		self.isGrazing = true
+		-- Per-animal calm-behavior cycler. Picks from a species-weighted pool
+		-- of {graze, eat, chew, idle} with random durations and per-animal
+		-- phase offset (deterministic from self.id). Without this all animals
+		-- enter graze on the same tick and play the same clip in lockstep.
+		local cacheStates = self.cache and self.cache.states
+		if self.calmBehavior == nil then
+			self.calmBehavior = CalmBehaviorCycler.pickInitialBehavior(self, cacheStates)
+		else
+			CalmBehaviorCycler.maybeRotate(self, cacheStates, g_time)
+		end
+		-- Keep isGrazing in sync with the cycler so any external consumers
+		-- (existing grazing-suppression checks elsewhere) still get a usable
+		-- signal. AnimalAnimation reads calmBehavior.id directly.
+		self.isGrazing = (self.calmBehavior.id == "graze")
 	else
+		self.calmBehavior = nil
 		self.isGrazing = false
 	end
 	self.grazeTarget = nil

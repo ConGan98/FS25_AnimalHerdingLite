@@ -59,6 +59,13 @@ function HerdingEvent:readStream(streamId, connection)
 
                 local animal, navMeshAgent = animalManager:createHerdableAnimalFromData(animalTypeIndex, visualAnimalIndex, tiles)
                 animal:readStream(streamId)
+                -- Re-cache speciesCfg now that self.id is set on the client.
+                -- createHerdableAnimalFromData runs validateSpeed before
+                -- readStream, so the personality jitter would otherwise seed
+                -- from a nil id and every client-side animal would share
+                -- identical default-jittered tuning instead of matching the
+                -- server's per-id values.
+                animal:validateSpeed(animalTypeIndex)
                 animal:applyAnimationNames()
                 animal:setHotspotFarmId(farmId)
                 animal:createCollisionController(navMeshAgent.height, navMeshAgent.radius, animalTypeIndex)
